@@ -23,8 +23,8 @@ And run `shards install` or just `shards`.
 
 # Introduction
 
-`VirtualTime` is a shard which implements the low-level component; a class, closely related to the Time struct,
-that is used for matching Times.
+`VirtualTime` is a shard which implements the low-level component. It contains a class `VirtualTime` that is
+used for matching Times.
 
 `VirtualDate` is the high-level component. It represents actual things you want to schedule and/or their reminders.
 
@@ -120,11 +120,11 @@ p vd.on?( Time["2023-03-18"]) # ==> true
 # But it is not due on Mar 20, 2017, because that date is omitted, and the system will give us
 # a span of time (offset) when it can be scheduled. Based on our reschedule settings above, this
 # will be a span for 2 days later.
-p vd.on?( VirtualDate["2017-03-20"]) # ==> #<Time::Span @span=2.00:00:00>
+p vd.on?( Time["2017-03-20"]) # ==> #<Time::Span @span=2.00:00:00>
 
 # Asking whether the vd is due on the rescheduled date (Mar 22) will tell us no, because currently
 # rescheduled dates are not counted as due/on dates:
-p vd.on?( VirtualDate["2017-03-22"]) # ==> nil
+p vd.on?( Time["2017-03-22"]) # ==> nil
 ```
 
 Here's another example of a VirtualDate that is due on every other day in March, but if it falls
@@ -145,7 +145,7 @@ not_due_weekend.day_of_week = [6,7]
 vd.omit << not_due_weekend
 
 # If item falls on an omitted day, consider it as not scheduled (don't try rescheduling):
-vd.shift = nil
+vd.shift = nil # or 'false' to explicitly say it's omitted; false is the default value
 
 # Now let's check when it is due and when not in March:
 # (Do this by printing a list for days 1 - 31):
