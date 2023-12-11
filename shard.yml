@@ -1,4 +1,4 @@
-name: virtualtime
+name: virtualdate
 version: 1.0.0
 
 authors:
@@ -6,4 +6,9 @@ authors:
 
 crystal: 0.35.1
 
-license: GPL-3.0
+license: AGPL-3.0
+
+dependencies:
+  virtualtime:
+    github: crystallabs/virtualtime
+    version: ~> 1.0
