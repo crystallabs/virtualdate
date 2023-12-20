@@ -363,6 +363,153 @@ describe VirtualDate do
     vd.on?(date).should eq -15.minutes
   end
 
+  it "can match virtual dates" do
+    item = VirtualDate.new
+
+    vt = VirtualTime.new year: 2017, month: 3, day: 15
+    item.due << vt
+
+    date = vt.dup
+    item.due_on_any_date?(date).should be_true
+    date.year = nil
+    date.month = nil
+    date.day = nil
+    item.due_on_any_date?(date).should be_true
+    date.month = 3
+    item.due_on_any_date?(date).should be_true
+    date.month = 4
+    item.due_on_any_date?(date).should be_nil
+
+    date = VirtualTime.new
+    date.month = nil
+    date.day = 15
+    item.due_on_any_date?(date).should be_true
+    date.day = 1
+    item.due_on_any_date?(date).should be_nil
+    date.day = 13..18
+    item.due_on_any_date?(date).should be_true
+    vt.day = 10..20
+    item.due_on_any_date?(date).should be_true
+    vt.day = 15
+    date.day = 15
+    item.due_on_any_date?(date).should be_true
+    date.day = nil
+    item.due_on_any_date?(date).should be_true
+    date.month = 2
+    item.due_on_any_date?(date).should be_nil
+    date.month = 3
+    item.due_on_any_date?(date).should be_true
+    date.day = 13..18
+    item.due_on_any_date?(date).should be_true
+
+    vt2 = VirtualTime.new
+    vt2.month = 3
+    item.due = [vt2]
+    date = VirtualTime.new
+    date.day = 13..18
+    item.due_on_any_date?(date).should be_true
+    date.month = 2
+    item.due_on_any_date?(date).should be_nil
+    date.month = 2..4
+    item.due_on_any_date?(date).should be_true
+    date.month = nil
+    vt2.month = nil
+    vt2.day = 15..18
+    date.day = 15..18
+    item.due_on_any_date?(date).should be_true
+    date.day = 15..19
+    item.due_on_any_date?(date).should be_true
+  end
+
+  it "can shift on simple rules" do
+    item = VirtualDate.new
+    due = VirtualTime.new year: 2017, month: 3, day: 15
+    date = VirtualTime.new year: 2017, month: 3, day: 15
+    omit = VirtualTime.new year: 2017, month: 3, day: 15
+    omit2 = VirtualTime.new year: 2017, month: 3, day: 14
+    shift = -1.day
+
+    item.due = [due]
+    item.on?(date).should be_true
+    item.omit = [omit]
+    item.on?(date).should be_false
+    item.shift = shift
+
+    item.on?(date).should eq -1.day
+    item.omit << omit2
+    item.on?(date).should eq -2.days
+
+    item = VirtualDate.new
+    due = VirtualTime.new year: 2017, month: 3, day: 15, hour: 1, minute: 34, second: 0
+    date = VirtualTime.new year: 2017, month: 3, day: 15, hour: 1, minute: 34, second: 0
+    item.shift = 3.minutes
+    omit = VirtualTime.new
+    omit.hour = 1
+    item.due = [due]
+    item.omit = [omit]
+    item.on?(date).should eq 27.minutes
+  end
+
+  it "can shift on complex rules" do
+    item = VirtualDate.new
+    due = VirtualTime.new
+    due.day = 4
+    date = VirtualTime.new
+    date.day = 4
+    item.shift = Time::Span.new days: 7, hours: 10, minutes: 20, seconds: 30
+    omit = VirtualTime.new
+    omit.day = 4
+    item.due = [due]
+    item.omit = [omit]
+    item.on?(date).should eq Time::Span.new days: 7, hours: 10, minutes: 20, seconds: 30
+
+    item = VirtualDate.new
+    due = VirtualTime.new
+    due.day = 4
+    date = VirtualTime.new
+    date.day = 4
+    item.shift = Time::Span.new days: 7, hours: 10, minutes: 20, seconds: 30
+    omit = VirtualTime.new
+    omit.day = 3..14
+    item.due = [due]
+    item.omit = [omit]
+    item.on?(date).should eq Time::Span.new days: 14, hours: 20, minutes: 41, seconds: 0
+
+    item = VirtualDate.new
+    tl = Time.local.at_beginning_of_month
+    item.due = [VirtualTime.new day: tl.day]
+    item.omit = [VirtualTime.new(day: tl.day..((tl + 9.days).day))]
+    item.shift = Time::Span.new days: 7, hours: 10, minutes: 20, seconds: 30
+    date = VirtualTime.from_time tl.at_beginning_of_day
+    item.on?(date).should eq Time::Span.new days: 14, hours: 20, minutes: 41, seconds: 0
+  end
+
+  it "can check due_on_any_dates with ranges" do
+    item = VirtualDate.new
+    due = VirtualTime.new
+    due.day = 4..12
+    # item.shift= VirtualTime::Span.new 7,10,20,30
+    omit = VirtualTime.new
+    omit.day = 12
+    item.due = [due]
+    item.omit = [omit]
+
+    date = VirtualTime.new
+    date.day = 8..11
+    # puts date.inspect
+
+    item.on?(date).should be_true
+
+    date.day = 8..14
+
+    dates = date.expand
+    r = dates.map { |d| item.on? d }
+    r.should eq [true, true, true, true, false, nil, nil]
+
+    # And another form of saying it:
+    dates.map { |d| item.on? d }.any? { |x| x }.should be_true
+  end
+
   it "can shift til !due_on?( @omit) && due_on?( @due)" do
     vd = VirtualDate.new
     vd.shift = 1.day

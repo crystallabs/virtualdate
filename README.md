@@ -2,11 +2,11 @@
 [![Version](https://img.shields.io/github/tag/crystallabs/virtualdate.svg?maxAge=360)](https://github.com/crystallabs/virtualdate/releases/latest)
 [![License](https://img.shields.io/github/license/crystallabs/virtualdate.svg)](https://github.com/crystallabs/virtualdate/blob/master/LICENSE)
 
-VirtualDate is a time scheduling component for Crystal. It is a sibling project of [virtualtime](https://github.com/crystallabs/virtualtime).
+VirtualDate is a time scheduling component for Crystal. It is a companion project to [virtualtime](https://github.com/crystallabs/virtualtime).
 It is used for complex and flexible, and often recurring, time/event scheduling.
 
 VirtualTime from the other shard implements the low-level time matching component.
-VirtualDate implements the high-level part, the actual items one might want to schedule.
+This shard VirtualDate implements the high-level part, the actual items one might want to schedule.
 
 # Installation
 
@@ -44,7 +44,7 @@ should not be on (e.g. on weekends or public holidays).
 Also, if an item would fall on an omitted date or time, then it might be desired to automatically
 reschedule it by shifting it by certain amount of time before or after the original time.
 
-Thus, `VirtualDate` has the following properties:
+Thus, altogether `VirtualDate` has the following properties:
 
 - `start`, an absolute start time, before which the VirtualDate is never on
 - `stop`, an absolute end time, after which the VirtualDate is never on
@@ -65,7 +65,7 @@ and to simply treat it as not scheduled on a particular date. A `Boolean` explic
 when it falls on an omitted time. A `Time::Span` implies that rescheduling should be attempted and controls by
 how much time the item should be shifted (into the past or future) on every attempt.
 
-If there are multiple `VirtualDate`s set for a field, e.g. for `due` date, the matches are logically OR-ed;
+If there are multiple `VirtualTime`s set for a field, e.g. for `due` date, the matches are logically OR-ed;
 one match is enough for the field to match.
 
 # Usage
