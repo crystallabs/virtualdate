@@ -3,16 +3,16 @@ require "virtualtime"
 class VirtualDate
   VERSION_MAJOR    = 1
   VERSION_MINOR    = 0
-  VERSION_REVISION = 1
+  VERSION_REVISION = 2
   VERSION          = [VERSION_MAJOR, VERSION_MINOR, VERSION_REVISION].join '.'
 
   alias TimeOrVirtualTime = Time | VirtualTime
 
   # Absolute begin date/time. Item is never "on" before this date.
-  property begin : Time?
+  property begin : TimeOrVirtualTime?
 
   # Absolute end date/time. Item is never "on" after this date.
-  property end : Time?
+  property end : TimeOrVirtualTime?
 
   # List of VirtualTimes on which the item is "on"/due/active.
   property due = [] of VirtualTime
@@ -76,16 +76,44 @@ class VirtualDate
     # If `@on` is non-nil, it will dictate the item's status.
     @on.try { |status| return status }
 
-    # VirtualTimes do not have a <=> relation. They inevitably must be converted to a `Time` before such comparisons.
-    # Even a time hint is supported, in case you are checking for some date in the future.
+    # If date asked is not within item's absolute begin-end time, consider it not scheduled
+    # When a/z and time asked are all Times, we check whether the time asked is (a < time < z) and return if not.
+    # When any one of those is a VirtualTime, we perform VirtualTime#matches?.
+    a, z = @begin, @end
+
+    a.try do |a|
+      case a
+      when Time
+        case time
+        when Time
+          return if a > time
+        else
+          return unless time.matches? a
+        end
+      else
+        return unless a.matches? time
+      end
+    end
+
+    z.try do |z|
+      case z
+      when Time
+        case time
+        when Time
+          return if z < time
+        else
+          return unless time.matches? z
+        end
+      else
+        return unless z.matches? time
+      end
+    end
+
+    # After the matching on a/z was performed, `time` always needs to be
+    # converted to `Time` for the rest of the process.
     if time.is_a? VirtualTime
       time = time.to_time hint
     end
-
-    # If date asked is not within item's absolute begin-end time, consider it not scheduled
-    a, z = @begin, @end
-    return if a && (a > time)
-    return if z && (z < time)
 
     # Otherwise, we go perform the calculation:
     yes = due_on? time
