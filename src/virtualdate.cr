@@ -6,13 +6,11 @@ class VirtualDate
   VERSION_REVISION = 2
   VERSION          = [VERSION_MAJOR, VERSION_MINOR, VERSION_REVISION].join '.'
 
-  alias TimeOrVirtualTime = Time | VirtualTime
-
   # Absolute begin date/time. Item is never "on" before this date.
-  property begin : TimeOrVirtualTime?
+  property begin : VirtualTime::TimeOrVirtualTime?
 
   # Absolute end date/time. Item is never "on" after this date.
-  property end : TimeOrVirtualTime?
+  property end : VirtualTime::TimeOrVirtualTime?
 
   # List of VirtualTimes on which the item is "on"/due/active.
   property due = [] of VirtualTime
@@ -72,7 +70,7 @@ class VirtualDate
   # true - item is "on" (it is "due" and not on "omit" list)
   # false - item is due, but that date is omitted, and no reschedule was requested or possible, so effectively it is not "on"
   # Time::Span - span which is to be added to asked date to reach the earliest/closest time when item is "on"
-  def on?(time : TimeOrVirtualTime = Time.local, *, max_shift = @max_shift, max_shifts = @max_shifts, hint = time.is_a?(Time) ? time : Time.local)
+  def on?(time : VirtualTime::TimeOrVirtualTime = Time.local, *, max_shift = @max_shift, max_shifts = @max_shifts, hint = time.is_a?(Time) ? time : Time.local)
     # If `@on` is non-nil, it will dictate the item's status.
     @on.try { |status| return status }
 
@@ -160,41 +158,41 @@ class VirtualDate
   # Due Date/Time-related functions
 
   # Checks if item is due on any of its date and time specifications.
-  def due_on?(time : TimeOrVirtualTime = Time.local, times = @due)
+  def due_on?(time : VirtualTime::TimeOrVirtualTime = Time.local, times = @due)
     due_on_any_date?(time, times) && due_on_any_time?(time, times)
   end
 
   # Checks if item is due on any of its date specifications (without times).
-  def due_on_any_date?(time : TimeOrVirtualTime = Time.local, times = @due)
+  def due_on_any_date?(time : VirtualTime::TimeOrVirtualTime = Time.local, times = @due)
     matches_any_date?(time, times, true)
   end
 
   # Checks if item is due on any of its time specifications (without dates).
-  def due_on_any_time?(time : TimeOrVirtualTime = Time.local, times = @due)
+  def due_on_any_time?(time : VirtualTime::TimeOrVirtualTime = Time.local, times = @due)
     matches_any_time?(time, times, true)
   end
 
   # Omit Date/Time-related functions
 
   # Checks if item is omitted on any of its date and time specifications.
-  def omit_on?(time : TimeOrVirtualTime = Time.local, times = @omit)
+  def omit_on?(time : VirtualTime::TimeOrVirtualTime = Time.local, times = @omit)
     omit_on_dates?(time, times) && omit_on_times?(time, times)
   end
 
   # Checks if item is omitted on any of its date specifications (without times).
-  def omit_on_dates?(time : TimeOrVirtualTime = Time.local, times = @omit)
+  def omit_on_dates?(time : VirtualTime::TimeOrVirtualTime = Time.local, times = @omit)
     matches_any_date?(time, times, nil)
   end
 
   # Checks if item is omitted on any of its time specifications (without dates).
-  def omit_on_times?(time : TimeOrVirtualTime = Time.local, times = @omit)
+  def omit_on_times?(time : VirtualTime::TimeOrVirtualTime = Time.local, times = @omit)
     matches_any_time?(time, times, nil)
   end
 
   # Helper methods below, used by both due- and omit-related functions.
 
   # Checks if any item in `times` matches the date part of `time`
-  def matches_any_date?(time : TimeOrVirtualTime, times, default)
+  def matches_any_date?(time : VirtualTime::TimeOrVirtualTime, times, default)
     return default if !times || (times.size == 0)
 
     times.each do |vt|
@@ -205,7 +203,7 @@ class VirtualDate
   end
 
   # Checks if any item in `times` matches the time part of `time`
-  def matches_any_time?(time : TimeOrVirtualTime, times, default)
+  def matches_any_time?(time : VirtualTime::TimeOrVirtualTime, times, default)
     return default if !times || (times.size == 0)
 
     times.each do |e|
