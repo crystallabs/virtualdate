@@ -24,6 +24,26 @@ describe VirtualDate do
     vd.on?(date).should be_true
   end
 
+  it "honors begin/end as VirtualTime" do
+    vd = VirtualDate.new
+    vd.begin = VirtualTime.new(day: 10..20)
+    vd.on?(Time.local(2023, 5, 9)).should be_nil
+    vd.on?(Time.local(2023, 5, 14)).should be_true
+    vd.on?(Time.local(2023, 5, 21)).should be_nil
+  end
+
+  it "on override takes precedence over begin/end" do
+    vd = VirtualDate.new
+    vd.begin = Time.local(2023, 1, 1)
+    vd.end = Time.local(2023, 1, 2)
+
+    vd.on = true
+    vd.on?(Time.local(2024, 1, 1)).should be_true
+
+    vd.on = false
+    vd.on?(Time.local(2023, 1, 1)).should be_false
+  end
+
   it "honors due dates" do
     date = Time.parse_local("2017-3-15 10:10:10", "%F %X")
 
@@ -199,6 +219,55 @@ describe VirtualDate do
     vd.on?(date).should be_false
   end
 
+  it "shift = true ignores omit rules" do
+    vd = VirtualDate.new
+    due = VirtualTime.new(day: 15)
+    omit = VirtualTime.new(day: 15)
+
+    vd.due << due
+    vd.omit << omit
+    vd.shift = true
+
+    vd.on?(Time.local(2023, 3, 15)).should be_true
+  end
+
+  it "shift = nil treats omitted date as not applicable" do
+    vd = VirtualDate.new
+    due = VirtualTime.new(day: 15)
+    omit = VirtualTime.new(day: 15)
+
+    vd.due << due
+    vd.omit << omit
+    vd.shift = nil
+
+    vd.on?(Time.local(2023, 3, 15)).should be_nil
+  end
+
+  it "handles DST transitions when shifting" do
+    loc = Time::Location.load("Europe/Berlin")
+    date = Time.local(2023, 3, 26, 1, 30, location: loc)
+
+    vd = VirtualDate.new
+    vd.shift = 1.hour
+
+    omit = VirtualTime.from_time(date)
+    vd.omit << omit
+
+    vd.on?(date).should eq 1.hour
+  end
+
+  it "omit requires both date and time to match" do
+    vd = VirtualDate.new
+    omit = VirtualTime.new
+    omit.day = 15
+    vd.omit << omit
+
+    vd.omit_on?(Time.local(2023, 3, 15, 10, 0)).should be_true
+
+    omit.hour = 9
+    vd.omit_on?(Time.local(2023, 3, 15, 10, 0)).should be_nil
+  end
+
   it "supports ranges" do
     date = Time.parse_local("2017-3-15", "%F")
 
@@ -322,20 +391,20 @@ describe VirtualDate do
     vd.due_on_any_date?(date).should be_true
     vd.due_on_any_time?(date).should be_nil
 
-    vd4 = VirtualTime.from_time(Time.parse_local("2017-3-15", "%F")).nil_time!
+    vd4 = VirtualTime.from_time(Time.parse_local("2017-3-15", "%F")).clear_time!
     vd.due << vd4
     vd.due_on?(date).should be_true
 
-    vd5 = VirtualTime.from_time(Time.parse_local("12:13:14", "%X")).nil_date!
+    vd5 = VirtualTime.from_time(Time.parse_local("12:13:14", "%X")).clear_date!
     vd.due = [vd5]
     vd.due_on?(date).should be_true
 
-    vd6 = VirtualTime.from_time(Time.parse_local("12:13:15", "%X")).nil_date!
+    vd6 = VirtualTime.from_time(Time.parse_local("12:13:15", "%X")).clear_date!
     vd.due = [vd6]
     vd.due_on?(date).should be_nil
 
     date = Time.parse_local("2017-3-15 1:2:3", "%F %X")
-    vd7 = VirtualTime.from_time(Time.parse_local("2017-3-18", "%F")).nil_time!
+    vd7 = VirtualTime.from_time(Time.parse_local("2017-3-18", "%F")).clear_time!
     vd.due_on?(date).should be_nil
     vd.due_on_any_date?(date).should be_true
     vd.due = [vd7]

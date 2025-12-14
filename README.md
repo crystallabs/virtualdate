@@ -2,13 +2,7 @@
 [![Version](https://img.shields.io/github/tag/crystallabs/virtualdate.svg?maxAge=360)](https://github.com/crystallabs/virtualdate/releases/latest)
 [![License](https://img.shields.io/github/license/crystallabs/virtualdate.svg)](https://github.com/crystallabs/virtualdate/blob/master/LICENSE)
 
-VirtualDate is a time scheduling component for Crystal. It is a companion project to [virtualtime](https://github.com/crystallabs/virtualtime).
-It is used for complex and flexible, and often recurring, time/event scheduling.
-
-VirtualTime from the other shard implements the low-level time matching component.
-This shard VirtualDate implements the high-level part, the actual items one might want to schedule.
-
-# Installation
+## Installation
 
 Add the following to your application's "shard.yml":
 
@@ -21,12 +15,15 @@ Add the following to your application's "shard.yml":
 
 And run `shards install` or just `shards`.
 
-# Introduction
+## Introduction
 
-`VirtualTime` is a shard which implements the low-level component. It contains a class `VirtualTime` that is
-used for matching Times.
+VirtualDate is a companion project to [virtualtime](https://github.com/crystallabs/virtualtime).
+It is used for complex and flexible, and often recurring, time/event scheduling.
 
-`VirtualDate` is the high-level component. It represents actual things you want to schedule and/or their reminders.
+VirtualTime implements the low-level time matching and finding/generating component.
+
+VirtualDate implements the high-level part, the actual items one might want to schedule, with
+additional options and fields.
 
 The class is intentionally called `VirtualDate` not to imply a particular type or purpose
 (i.e. it can be a task, event, recurring appointment, reminder, etc.)
@@ -34,71 +31,33 @@ The class is intentionally called `VirtualDate` not to imply a particular type o
 Likewise, it does not contain any task/event-specific properties -- it only concerns itself with
 the matching and scheduling aspect.
 
-For a schedulable item it is not enough to have just one `VirtualTime` that controls
-when that item is active/scheduled (or simply "on" in virtualtime's terminology).
+## Usage
 
-Instead, for additional flexibility, at a minimum you might want to be able to specify multiple
-`VirtualTimes` at which the item is on, and specify an omit list when an item
-should not be on (e.g. on weekends or public holidays).
-
-Also, if an item would fall on an omitted date or time, then it might be desired to automatically
-reschedule it by shifting it by certain amount of time before or after the original time.
-
-Thus, altogether `VirtualDate` has the following properties:
-
-- `start`, an absolute start time, before which the VirtualDate is never on
-- `stop`, an absolute end time, after which the VirtualDate is never on
-
-- `due`, a list of VirtualTimes on which the VirtualDate is on
-- `omit`, a list of VirtualTimes on which the VirtualDate is omitted (not on)
-- `shift`, governing whether, and by how much time, the VirtualDate should be shifted if it falls on an omitted date/time
-- `max_shift`, a maximum Time::Span by which the VirtualDate can be shifted before being considered unschedulable
-- `max_shifts`, a maximum number of shift attempts to make in an attempt to find a suitable rescheduled date and time
-
-- `on`, a property which overrides all other VirtualDate's fields and calculations and directly sets VirtualDate's `on` status
-
-If the item's list of due dates is empty, it is considered as always "on".
-If the item's list of omit dates is empty, it is considered as never omitted.
-
-A value of `shift` can be nil, `Boolean`, or`Time::Span`. Nil instructs that event should not be rescheduled,
-and to simply treat it as not scheduled on a particular date. A `Boolean` explicitly marks the item as scheduled or rejected
-when it falls on an omitted time. A `Time::Span` implies that rescheduling should be attempted and controls by
-how much time the item should be shifted (into the past or future) on every attempt.
-
-If there are multiple `VirtualTime`s set for a field, e.g. for `due` date, the matches are logically OR-ed;
-one match is enough for the field to match.
-
-# Usage
-
-## Matching
-
-Let's start with creating a VirtualDate:
+Comments in the code hopefully show how to use it:
 
 ```crystal
 vd = VirtualDate.new
 
 # Create a VirtualTime that matches every other day from Mar 10 to Mar 20:
-due_march = VirtualTime.new
-due_march.month = 3
-due_march.day = (10..20).step 2
+march = VirtualTime.new
+march.month = 3
+march.day = (10..20).step 2
 
-# Add this VirtualTime as due date to vd:
-vd.due << due_march
+# Add this VirtualTime as a due date to our VirtualDate:
+vd.due << march
 
-# Create a VirtualTime that matches Mar 20 specifically. We will use this to actually omit
-# the event on that day:
-omit_march_20 = VirtualTime.new
-omit_march_20.month = 3
-omit_march_20.day = 20
-
-# Add this VirtualTime as omit date to vd:
-vd.omit << omit_march_20
+# Create a VirtualTime that matches Mar 20 specifically, and omit the event
+# on that particular day:
+march_20 = VirtualTime.new
+march_20.month = 3
+march_20.day = 20
+vd.omit << march_20
 
 # If event falls on an omitted date, try rescheduling it for 2 days later:
 vd.shift = 2.days
 ```
 
-Now we can check when the vd is due and when it is not (ignore the `Time[]` syntax):
+Now we can check when the VD is due and when it is not (ignore the `Time[]` syntax):
 
 ```crystal
 # VirtualDate is not due on Feb 15, 2017 because that's not in March:
@@ -122,7 +81,7 @@ p vd.on?( Time["2023-03-18"]) # ==> true
 # will be a span for 2 days later.
 p vd.on?( Time["2017-03-20"]) # ==> #<Time::Span @span=2.00:00:00>
 
-# Asking whether the vd is due on the rescheduled date (Mar 22) will tell us no, because currently
+# Asking whether the VD is due on the rescheduled date (Mar 22) will tell us no, because currently
 # rescheduled dates are not counted as due/on dates:
 p vd.on?( Time["2017-03-22"]) # ==> nil
 ```
@@ -134,17 +93,18 @@ on a weekend it is ignored:
 vd = VirtualDate.new
 
 # Create a VirtualTime that matches every other (every even) day in March:
-due_march = VirtualTime.new
-due_march.month = 3
-due_march.day = (2..31).step 2
-vd.due << due_march
+march = VirtualTime.new
+march.month = 3
+march.day = (2..31).step 2
+vd.due << march
 
 # But on weekends it should not be scheduled:
-not_due_weekend = VirtualTime.new
-not_due_weekend.day_of_week = [6,7]
-vd.omit << not_due_weekend
+weekend = VirtualTime.new
+weekend.day_of_week = [6,7]
+vd.omit << weekend
 
-# If item falls on an omitted day, consider it as not scheduled (don't try rescheduling):
+# If item falls on an omitted day, consider it as not scheduled (don't
+# try rescheduling):
 vd.shift = nil # or 'false' to explicitly say it's omitted; false is the default value
 
 # Now let's check when it is due and when not in March:
@@ -153,6 +113,55 @@ vd.shift = nil # or 'false' to explicitly say it's omitted; false is the default
   p "Mar-#{d} = #{vd.on?( Time.local(2023, 3, d)}"
 end
 ```
+
+## More Information
+
+For a realistic, schedulable item it is not enough to have just one `VirtualTime` that controls
+when that item is active/scheduled (or simply "on" in VT's terminology).
+
+At a minimum, you might want to specify multiple `VirtualTimes` at which the item is on, and
+specify an omit list when an item should not be on (e.g. on weekends or public holidays).
+
+Also, if an item would fall on an omitted date or time, then it might be desired to automatically
+reschedule it by shifting it by certain amount of time before or after the original time.
+
+Thus, altogether class `VirtualDate` has the following properties:
+
+- `start`, an absolute start time, before which the VirtualDate is never on
+- `stop`, an absolute end time, after which the VirtualDate is never on
+
+- `due`, a list of VirtualTimes on which the VirtualDate is on
+- `omit`, a list of VirtualTimes on which the VirtualDate is omitted (not on)
+- `shift`, governing whether, and by how much time, the VirtualDate should be shifted if it falls on an omitted date/time
+- `max_shifts`, a maximum number of shift attempts to make in an attempt to find a suitable rescheduled date and time
+- `max_shift`, a maximum Time::Span by which the VirtualDate can be shifted before being considered unschedulable
+
+- `on`, a property which overrides all other VirtualDate's fields and calculations and directly sets VirtualDate's `on` status
+
+If the item's list of due dates is empty, it is considered as always "on".
+If the item's list of omit dates is empty, it is considered as never omitted.
+
+A value of `shift` can be nil, `Boolean`, or`Time::Span`.
+
+- Nil instructs that event should not be rescheduled, and to simply treat it as not scheduled on a particular date
+- A `Boolean` explicitly marks the item as scheduled or rejected when it falls on an omitted time
+- A `Time::Span` implies that rescheduling should be attempted and controls by how much time the item should be shifted (into the past or future) on every attempt
+
+If there are multiple `VirtualTime`s set for a field, e.g. for `due` date, the matches are logically OR-ed;
+one match is enough for the field to match.
+
+### Start and End Dates
+
+In addition to absolute `Time` values, `start` and `end` can be `VirtualTime`s. When they are set to those types,
+they don't act like usual to confine VD's scheduling to the from-to period, but the actual times asked must
+`match?` both of them (if they are specified) in the usual, VT's sense.
+
+In other words, to have a VD active during say, summer months, you could define `start = VirtualTime.new month: 4..10`,
+and would not need any `stop` value.
+
+This functionality is quite redundant with the usual `due` and `omit` dates, is highly experimental,
+and probably not something to be used.
+
 
 ## Scheduling
 

@@ -2,8 +2,8 @@ require "virtualtime"
 
 class VirtualDate
   VERSION_MAJOR    = 1
-  VERSION_MINOR    = 0
-  VERSION_REVISION = 2
+  VERSION_MINOR    = 1
+  VERSION_REVISION = 0
   VERSION          = [VERSION_MAJOR, VERSION_MINOR, VERSION_REVISION].join '.'
 
   # Absolute begin date/time. Item is never "on" before this date.
@@ -70,7 +70,7 @@ class VirtualDate
   # true - item is "on" (it is "due" and not on "omit" list)
   # false - item is due, but that date is omitted, and no reschedule was requested or possible, so effectively it is not "on"
   # Time::Span - span which is to be added to asked date to reach the earliest/closest time when item is "on"
-  def on?(time : VirtualTime::TimeOrVirtualTime = Time.local, *, max_shift = @max_shift, max_shifts = @max_shifts, hint = time.is_a?(Time) ? time : Time.local)
+  def on?(time : VirtualTime::TimeOrVirtualTime = Time.local, *, max_shift = @max_shift, max_shifts = @max_shifts, hint = time.is_a?(Time) ? time : Time.local) : Nil | Bool | Time::Span
     # If `@on` is non-nil, it will dictate the item's status.
     @on.try { |status| return status }
 
@@ -124,34 +124,47 @@ class VirtualDate
         shift = @shift
         if shift.is_a? Nil | Bool
           shift
-        elsif shift.total_nanoseconds == 0
-          false
         else
           # +amount => search into the future, -amount => search into the past
-          new_time = time.dup
-
-          shifts = 0
-          ret = loop do
-            shifts += 1
-            new_time += shift
-
-            if (max_shift && ((new_time - time).total_nanoseconds.abs > max_shift.total_nanoseconds)) || (max_shifts && (shifts > max_shifts))
-              break false
-            end
-            if omit_on? new_time
-              next
-            else
-              break true
-            end
-
-            if shifts >= max_shifts
-              break false
-            end
-          end
-
-          return ret ? (new_time - time) : ret
+          reschedule(time, shift, max_shift: max_shift, max_shifts: max_shifts) { |t| omit_on?(t) == true }
         end
       end
+    end
+  end
+
+  # Attempts to shift `time` by `shift` until it no longer matches omit rules.
+  #
+  # Returns:
+  # - Time::Span -> delta to the first valid time
+  # - false      -> unschedulable within constraints
+  private def reschedule(time : Time, shift : Time::Span, *, max_shift : Time::Span?, max_shifts : Int32, &omit_on : Time -> Bool) : Bool | Time::Span
+    # Zero shift means "do not attempt reschedule"
+    return false if shift.total_nanoseconds == 0
+
+    original = time
+    current = time
+    shifts = 0
+
+    loop do
+      shifts += 1
+      current += shift
+
+      # Exceeded allowed number of attempts
+      return false if shifts > max_shifts
+
+      # Exceeded allowed total shift distance
+      if max_shift &&
+         (current - original).total_nanoseconds.abs > max_shift.total_nanoseconds
+        return false
+      end
+
+      # Still omitted → keep searching
+      if omit_on.call(current)
+        next
+      end
+
+      # Found a valid time
+      return current - original
     end
   end
 
@@ -192,7 +205,7 @@ class VirtualDate
   # Helper methods below, used by both due- and omit-related functions.
 
   # Checks if any item in `times` matches the date part of `time`
-  def matches_any_date?(time : VirtualTime::TimeOrVirtualTime, times, default)
+  def matches_any_date?(time : VirtualTime::TimeOrVirtualTime, times : Array(VirtualTime), default)
     return default if !times || (times.size == 0)
 
     times.each do |vt|
