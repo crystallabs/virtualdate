@@ -7,7 +7,7 @@ describe VirtualDate do
     vd.begin = Time.parse_local("2017-1-1", "%F")
     vd.end = Time.parse_local("2017-2-28", "%F")
     date = Time.parse_local("2017-3-15", "%F")
-    vd.on?(date).should be_nil
+    vd.strict_on?(date).should be_nil
     date = Time.parse_local("2017-2-1", "%F")
     vd.due_on?(date).should be_true
 
@@ -15,21 +15,21 @@ describe VirtualDate do
     vd.begin = Time.parse_local("2017-6-1", "%F")
     vd.end = Time.parse_local("2017-9-1", "%F")
     date = Time.parse_local("2017-3-15", "%F")
-    vd.on?(date).should be_nil
+    vd.strict_on?(date).should be_nil
 
     vd = VirtualDate.new
     vd.begin = Time.parse_local("2017-1-1", "%F")
     vd.end = Time.parse_local("2017-9-1", "%F")
     date = Time.parse_local("2017-3-15 10:10:10", "%F %X")
-    vd.on?(date).should be_true
+    vd.strict_on?(date).should be_true
   end
 
   it "honors begin/end as VirtualTime" do
     vd = VirtualDate.new
     vd.begin = VirtualTime.new(day: 10..20)
-    vd.on?(Time.local(2023, 5, 9)).should be_nil
-    vd.on?(Time.local(2023, 5, 14)).should be_true
-    vd.on?(Time.local(2023, 5, 21)).should be_nil
+    vd.strict_on?(Time.local(2023, 5, 9)).should be_nil
+    vd.strict_on?(Time.local(2023, 5, 14)).should be_true
+    vd.strict_on?(Time.local(2023, 5, 21)).should be_nil
   end
 
   it "on override takes precedence over begin/end" do
@@ -38,10 +38,10 @@ describe VirtualDate do
     vd.end = Time.local(2023, 1, 2)
 
     vd.on = true
-    vd.on?(Time.local(2024, 1, 1)).should be_true
+    vd.strict_on?(Time.local(2024, 1, 1)).should be_true
 
     vd.on = false
-    vd.on?(Time.local(2023, 1, 1)).should be_false
+    vd.strict_on?(Time.local(2023, 1, 1)).should be_false
   end
 
   it "honors due dates" do
@@ -216,7 +216,7 @@ describe VirtualDate do
     vt.month = 9
     # Now it no longer matches:
     vd.omit_on?(date).should be_true
-    vd.on?(date).should be_false
+    vd.strict_on?(date).should be_false
   end
 
   it "shift = true ignores omit rules" do
@@ -228,7 +228,7 @@ describe VirtualDate do
     vd.omit << omit
     vd.shift = true
 
-    vd.on?(Time.local(2023, 3, 15)).should be_true
+    vd.strict_on?(Time.local(2023, 3, 15)).should be_true
   end
 
   it "shift = nil treats omitted date as not applicable" do
@@ -240,7 +240,7 @@ describe VirtualDate do
     vd.omit << omit
     vd.shift = nil
 
-    vd.on?(Time.local(2023, 3, 15)).should be_nil
+    vd.strict_on?(Time.local(2023, 3, 15)).should be_nil
   end
 
   it "handles DST transitions when shifting" do
@@ -253,7 +253,7 @@ describe VirtualDate do
     omit = VirtualTime.from_time(date)
     vd.omit << omit
 
-    vd.on?(date).should eq 1.hour
+    vd.strict_on?(date).should eq 1.hour
   end
 
   it "omit requires both date and time to match" do
@@ -316,11 +316,11 @@ describe VirtualDate do
     vt.month = 3
     vt.day = 15
 
-    vd.on?(date).should be_true
+    vd.strict_on?(date).should be_true
     vd.due << vt
-    vd.on?(date).should be_true
+    vd.strict_on?(date).should be_true
     vd.omit << vt
-    vd.on?(date).should be_false
+    vd.strict_on?(date).should be_false
   end
 
   it "reports shift amount on omitted due days" do
@@ -328,7 +328,7 @@ describe VirtualDate do
 
     vd = VirtualDate.new
 
-    vd.on?(date).should be_true
+    vd.strict_on?(date).should be_true
 
     vt = VirtualTime.new
     vt.year = 2017
@@ -336,7 +336,7 @@ describe VirtualDate do
     vt.day = 15
     vd.due << vt
 
-    vd.on?(date).should be_true
+    vd.strict_on?(date).should be_true
 
     vt2 = VirtualTime.new
     vt2.year = 2017
@@ -349,16 +349,16 @@ describe VirtualDate do
     vd3.day = 16
 
     vd.omit << vt2
-    vd.on?(date).should be_false
+    vd.strict_on?(date).should be_false
 
     vd.shift = -1.day
-    vd.on?(date).should eq -1.day
+    vd.strict_on?(date).should eq -1.day
     vd.shift = 4.days
-    vd.on?(date).should eq 4.days
+    vd.strict_on?(date).should eq 4.days
 
     vd.omit << vd3
     vd.shift = 1.day
-    vd.on?(date).should eq 2.days
+    vd.strict_on?(date).should eq 2.days
   end
 
   it "reports false when effective omit larger than allowed boundaries" do
@@ -366,7 +366,7 @@ describe VirtualDate do
 
     vd = VirtualDate.new
 
-    vd.on?(date).should be_true
+    vd.strict_on?(date).should be_true
 
     vd3 = VirtualTime.new
     vd3.year = 2017
@@ -377,7 +377,7 @@ describe VirtualDate do
 
     vd.omit << vd3
     vd.shift = 1.day
-    vd.on?(date, max_shift: limit_1day).should be_false
+    vd.strict_on?(date, max_shift: limit_1day).should be_false
   end
 
   it "can check due/omit date/time separately" do
@@ -426,10 +426,10 @@ describe VirtualDate do
     vd3.hour = 12
     vd.omit << vd3
 
-    vd.on?(date).should be_false
+    vd.strict_on?(date).should be_false
 
     vd.shift = -3.minutes
-    vd.on?(date).should eq -15.minutes
+    vd.strict_on?(date).should eq -15.minutes
   end
 
   it "can match virtual dates" do
@@ -499,14 +499,14 @@ describe VirtualDate do
     shift = -1.day
 
     item.due = [due]
-    item.on?(date).should be_true
+    item.strict_on?(date).should be_true
     item.omit = [omit]
-    item.on?(date).should be_false
+    item.strict_on?(date).should be_false
     item.shift = shift
 
-    item.on?(date).should eq -1.day
+    item.strict_on?(date).should eq -1.day
     item.omit << omit2
-    item.on?(date).should eq -2.days
+    item.strict_on?(date).should eq -2.days
 
     item = VirtualDate.new
     due = VirtualTime.new year: 2017, month: 3, day: 15, hour: 1, minute: 34, second: 0
@@ -516,7 +516,7 @@ describe VirtualDate do
     omit.hour = 1
     item.due = [due]
     item.omit = [omit]
-    item.on?(date).should eq 27.minutes
+    item.strict_on?(date).should eq 27.minutes
   end
 
   it "can shift on complex rules" do
@@ -530,7 +530,7 @@ describe VirtualDate do
     omit.day = 4
     item.due = [due]
     item.omit = [omit]
-    item.on?(date).should eq Time::Span.new days: 7, hours: 10, minutes: 20, seconds: 30
+    item.strict_on?(date).should eq Time::Span.new days: 7, hours: 10, minutes: 20, seconds: 30
 
     item = VirtualDate.new
     due = VirtualTime.new
@@ -542,7 +542,7 @@ describe VirtualDate do
     omit.day = 3..14
     item.due = [due]
     item.omit = [omit]
-    item.on?(date).should eq Time::Span.new days: 14, hours: 20, minutes: 41, seconds: 0
+    item.strict_on?(date).should eq Time::Span.new days: 14, hours: 20, minutes: 41, seconds: 0
 
     item = VirtualDate.new
     tl = Time.local.at_beginning_of_month
@@ -550,7 +550,7 @@ describe VirtualDate do
     item.omit = [VirtualTime.new(day: tl.day..((tl + 9.days).day))]
     item.shift = Time::Span.new days: 7, hours: 10, minutes: 20, seconds: 30
     date = VirtualTime.from_time tl.at_beginning_of_day
-    item.on?(date).should eq Time::Span.new days: 14, hours: 20, minutes: 41, seconds: 0
+    item.strict_on?(date).should eq Time::Span.new days: 14, hours: 20, minutes: 41, seconds: 0
   end
 
   it "can check due_on_any_dates with ranges" do
@@ -567,16 +567,16 @@ describe VirtualDate do
     date.day = 8..11
     # puts date.inspect
 
-    item.on?(date).should be_true
+    item.strict_on?(date).should be_true
 
     date.day = 8..14
 
     dates = date.expand
-    r = dates.map { |d| item.on? d }
+    r = dates.map { |d| item.strict_on? d }
     r.should eq [true, true, true, true, false, nil, nil]
 
     # And another form of saying it:
-    dates.map { |d| item.on? d }.any? { |x| x }.should be_true
+    dates.map { |d| item.strict_on? d }.any? { |x| x }.should be_true
   end
 
   it "can shift til !due_on?( @omit) && due_on?( @due)" do
@@ -593,7 +593,7 @@ describe VirtualDate do
 
     date = Time.local.at_beginning_of_month + 2.days
 
-    vd.on?(date).should eq 12.days
+    vd.strict_on?(date).should eq 12.days
   end
 
   it "respects max_shifts" do
@@ -608,13 +608,13 @@ describe VirtualDate do
     vd.omit = [omit]
 
     date = Time.unix 10
-    vd.on?(date, max_shifts: 30).should eq false
+    vd.strict_on?(date, max_shifts: 30).should eq false
 
     vd.shift = 1.second
-    vd.on?(date, max_shifts: 30).should eq 3.seconds
+    vd.strict_on?(date, max_shifts: 30).should eq 3.seconds
 
     vd.shift = 500.milliseconds
-    vd.on?(date, max_shifts: 3).should eq false
+    vd.strict_on?(date, max_shifts: 3).should eq false
   end
 
   it "can match against Time objects" do
@@ -624,9 +624,9 @@ describe VirtualDate do
     due.day = 1..15
     vd.due << due
 
-    vd.on?(Time.local(2018, 5, 5)).should be_true
-    vd.on?(Time.local(2018, 5, 15)).should be_true
-    vd.on?(Time.local(2018, 5, 16)).should be_nil
+    vd.strict_on?(Time.local(2018, 5, 5)).should be_true
+    vd.strict_on?(Time.local(2018, 5, 15)).should be_true
+    vd.strict_on?(Time.local(2018, 5, 16)).should be_nil
   end
 
   it "works correctly with wrap (negative values counting from the end)" do
@@ -635,8 +635,8 @@ describe VirtualDate do
     due.month = 5
     due.day = -2
     vd.due << due
-    vd.on?(Time.local(2018, 5, 30)).should be_true
-    vd.on?(Time.local(2018, 5, 31)).should be_nil
+    vd.strict_on?(Time.local(2018, 5, 30)).should be_true
+    vd.strict_on?(Time.local(2018, 5, 31)).should be_nil
   end
 
   it "uses negative numbers to count from end of month" do
@@ -655,7 +655,7 @@ require "spec"
 require "../src/virtualdate"
 
 describe "VirtualDate – advanced scheduling" do
-  describe "#resolve and #effective_on?" do
+  describe "#resolve and #on?" do
     it "treats shifted times as effectively on" do
       loc = Time::Location.load("Europe/Berlin")
       date = Time.local(2023, 3, 15, 10, 0, 0, location: loc)
@@ -669,18 +669,16 @@ describe "VirtualDate – advanced scheduling" do
       vd.omit << omit
       vd.shift = 2.hours
 
-      # Legacy behavior: on? reports shift
-      vd.on?(date).should eq 2.hours
+      vd.strict_on?(date).should eq 2.hours
 
       shifted = date + 2.hours
 
-      # Legacy on? does not consider shifted time "on"
-      vd.on?(shifted).should be_nil
+      vd.strict_on?(shifted).should be_nil
 
       # New semantics
       vd.resolve(date).should eq shifted
-      vd.effective_on?(shifted).should be_true
-      vd.effective_on?(date).should be_false
+      vd.on?(shifted).should be_true
+      vd.on?(date).should be_false
     end
 
     it "returns false when shifted time exceeds max_shift" do
@@ -693,11 +691,11 @@ describe "VirtualDate – advanced scheduling" do
       vd.max_shift = 30.minutes
 
       vd.resolve(date).should be_false
-      vd.effective_on?(date + 1.hour).should be_false
+      vd.on?(date + 1.hour).should be_false
     end
   end
 
-  describe "Scheduler basic placement" do
+  describe "Scheduler basic scheduling" do
     it "schedules a single task with duration" do
       scheduler = VirtualDate::Scheduler.new
 
@@ -710,11 +708,11 @@ describe "VirtualDate – advanced scheduling" do
       from = Time.local(2023, 5, 10, 0, 0, 0)
       to = Time.local(2023, 5, 10, 23, 59, 59)
 
-      instances = scheduler.build(from, to)
+      scheduled_tasks = scheduler.build(from, to)
 
-      instances.size.should eq 1
-      instances[0].start.hour.should eq 10
-      instances[0].finish.should eq instances[0].start + 1.hour
+      scheduled_tasks.size.should eq 1
+      scheduled_tasks[0].start.hour.should eq 10
+      scheduled_tasks[0].finish.should eq scheduled_tasks[0].start + 1.hour
     end
   end
 
@@ -741,12 +739,12 @@ describe "VirtualDate – advanced scheduling" do
       from = Time.local(2023, 5, 10)
       to = Time.local(2023, 5, 11)
 
-      instances = scheduler.build(from, to)
+      scheduled_tasks = scheduler.build(from, to)
 
-      instances.size.should eq 2
+      scheduled_tasks.size.should eq 2
 
-      first = instances.find(&.task.==(t1)).not_nil!
-      second = instances.find(&.task.==(t2)).not_nil!
+      first = scheduled_tasks.find(&.task.==(t1)).not_nil!
+      second = scheduled_tasks.find(&.task.==(t2)).not_nil!
 
       first.start.hour.should eq 9
       first.finish.should eq first.start + 2.hours
@@ -783,11 +781,11 @@ describe "VirtualDate – advanced scheduling" do
       from = Time.local(2023, 5, 10)
       to = Time.local(2023, 5, 11)
 
-      instances = scheduler.build(from, to)
+      scheduled_tasks = scheduler.build(from, to)
 
-      instances.size.should eq 3
+      scheduled_tasks.size.should eq 3
 
-      starts = instances.map(&.start)
+      starts = scheduled_tasks.map(&.start)
       starts.count { |t| t.hour == 10 && t.minute == 0 }.should eq 2
     end
   end
@@ -815,12 +813,12 @@ describe "VirtualDate – advanced scheduling" do
       from = Time.local(2023, 5, 10)
       to = Time.local(2023, 5, 11)
 
-      instances = scheduler.build(from, to)
+      scheduled_tasks = scheduler.build(from, to)
 
-      instances.size.should eq 2
+      scheduled_tasks.size.should eq 2
 
-      fixed_i = instances.find(&.task.==(fixed)).not_nil!
-      movable_i = instances.find(&.task.==(movable)).not_nil!
+      fixed_i = scheduled_tasks.find(&.task.==(fixed)).not_nil!
+      movable_i = scheduled_tasks.find(&.task.==(movable)).not_nil!
 
       fixed_i.start.hour.should eq 9
       movable_i.start.should be >= fixed_i.finish
@@ -845,18 +843,18 @@ describe "VirtualDate – advanced scheduling" do
       from = Time.local(2023, 5, 10)
       to = Time.local(2023, 5, 11)
 
-      instances = scheduler.build(from, to)
+      scheduled_tasks = scheduler.build(from, to)
 
-      instances.size.should eq 2
+      scheduled_tasks.size.should eq 2
 
-      ia = instances.find(&.task.==(a)).not_nil!
-      ib = instances.find(&.task.==(b)).not_nil!
+      ia = scheduled_tasks.find(&.task.==(a)).not_nil!
+      ib = scheduled_tasks.find(&.task.==(b)).not_nil!
 
       ib.start.should be >= ia.finish
     end
   end
 
-  describe "Scheduler + effective_on?" do
+  describe "Scheduler + on?" do
     it "reports on_in_schedule? correctly" do
       scheduler = VirtualDate::Scheduler.new
 
@@ -869,14 +867,14 @@ describe "VirtualDate – advanced scheduling" do
       from = Time.local(2023, 5, 10)
       to = Time.local(2023, 5, 11)
 
-      instances = scheduler.build(from, to)
+      scheduled_tasks = scheduler.build(from, to)
 
-      scheduler.on_in_schedule?(instances, task, Time.local(2023, 5, 10, 10, 30)).should be_true
-      scheduler.on_in_schedule?(instances, task, Time.local(2023, 5, 10, 11, 30)).should be_false
+      scheduler.on_in_schedule?(scheduled_tasks, task, Time.local(2023, 5, 10, 10, 30)).should be_true
+      scheduler.on_in_schedule?(scheduled_tasks, task, Time.local(2023, 5, 10, 11, 30)).should be_false
     end
   end
 
-  it "staggered scheduler creates multiple staggered instances" do
+  it "staggered scheduler creates multiple staggered scheduled_tasks" do
     scheduler = VirtualDate::Scheduler.new
 
     task = VirtualDate.new
@@ -887,17 +885,17 @@ describe "VirtualDate – advanced scheduling" do
 
     scheduler.tasks << task
 
-    instances = scheduler.build(
+    scheduled_tasks = scheduler.build(
       Time.local(2023, 5, 10, 0, 0),
       Time.local(2023, 5, 10, 23, 59)
     )
 
-    starts = instances.map(&.start)
+    starts = scheduled_tasks.map(&.start)
 
     starts.should contain(Time.local(2023, 5, 10, 10, 0))
     starts.should contain(Time.local(2023, 5, 10, 10, 30))
     starts.should contain(Time.local(2023, 5, 10, 11, 0))
-    instances.size.should eq 3
+    scheduled_tasks.size.should eq 3
   end
 
   it "ignores stagger when parallel is 1" do
@@ -911,16 +909,16 @@ describe "VirtualDate – advanced scheduling" do
 
     scheduler.tasks << task
 
-    instances = scheduler.build(
+    scheduled_tasks = scheduler.build(
       Time.local(2023, 5, 10),
       Time.local(2023, 5, 11)
     )
 
-    instances.size.should eq 1
-    instances.first.start.should eq Time.local(2023, 5, 10, 9, 0)
+    scheduled_tasks.size.should eq 1
+    scheduled_tasks.first.start.should eq Time.local(2023, 5, 10, 9, 0)
   end
 
-  it "does not create staggered instances past the horizon" do
+  it "does not create staggered scheduled_tasks past the horizon" do
     scheduler = VirtualDate::Scheduler.new
 
     task = VirtualDate.new
@@ -930,18 +928,18 @@ describe "VirtualDate – advanced scheduling" do
 
     scheduler.tasks << task
 
-    instances = scheduler.build(
+    scheduled_tasks = scheduler.build(
       Time.local(2023, 5, 10, 9, 0),
       Time.local(2023, 5, 10, 10, 45)
     )
 
-    instances.map(&.start).should eq [
+    scheduled_tasks.map(&.start).should eq [
       Time.local(2023, 5, 10, 10, 0),
       Time.local(2023, 5, 10, 10, 30),
     ]
   end
 
-  it "applies omit rules independently to staggered instances" do
+  it "applies omit rules independently to staggered scheduled_tasks" do
     scheduler = VirtualDate::Scheduler.new
 
     task = VirtualDate.new
@@ -956,12 +954,12 @@ describe "VirtualDate – advanced scheduling" do
 
     scheduler.tasks << task
 
-    instances = scheduler.build(
+    scheduled_tasks = scheduler.build(
       Time.local(2023, 5, 10),
       Time.local(2023, 5, 11)
     )
 
-    instances.map(&.start).should eq [
+    scheduled_tasks.map(&.start).should eq [
       Time.local(2023, 5, 10, 10, 0),
       Time.local(2023, 5, 10, 11, 0),
     ]
@@ -978,13 +976,13 @@ describe "VirtualDate – advanced scheduling" do
 
     scheduler.tasks << task
 
-    instances = scheduler.build(
+    scheduled_tasks = scheduler.build(
       Time.local(2023, 5, 10),
       Time.local(2023, 5, 11)
     )
 
-    instances.size.should eq 2
-    instances.map(&.start).should eq [
+    scheduled_tasks.size.should eq 2
+    scheduled_tasks.map(&.start).should eq [
       Time.local(2023, 5, 10, 10, 0),
       Time.local(2023, 5, 10, 10, 30),
     ]
@@ -1026,13 +1024,13 @@ describe "VirtualDate – advanced scheduling" do
 
       scheduler.tasks = [low, high]
 
-      instances = scheduler.build(
+      scheduled_tasks = scheduler.build(
         Time.local(2023, 5, 10),
         Time.local(2023, 5, 11)
       )
 
-      hi = instances.find(&.task.==(high)).not_nil!
-      lo = instances.find(&.task.==(low)).not_nil!
+      hi = scheduled_tasks.find(&.task.==(high)).not_nil!
+      lo = scheduled_tasks.find(&.task.==(low)).not_nil!
 
       hi.start.hour.should eq 9
       lo.start.should be >= hi.finish
@@ -1059,13 +1057,13 @@ describe "VirtualDate – advanced scheduling" do
 
       scheduler.tasks = [movable, fixed]
 
-      instances = scheduler.build(
+      scheduled_tasks = scheduler.build(
         Time.local(2023, 5, 10),
         Time.local(2023, 5, 11)
       )
 
-      fi = instances.find(&.task.==(fixed)).not_nil!
-      mi = instances.find(&.task.==(movable)).not_nil!
+      fi = scheduled_tasks.find(&.task.==(fixed)).not_nil!
+      mi = scheduled_tasks.find(&.task.==(movable)).not_nil!
 
       fi.start.hour.should eq 9
       mi.start.should be >= fi.finish
@@ -1099,14 +1097,14 @@ describe "VirtualDate – advanced scheduling" do
 
       scheduler.tasks = [a, blocker, b]
 
-      instances = scheduler.build(
+      scheduled_tasks = scheduler.build(
         Time.local(2023, 5, 10),
         Time.local(2023, 5, 11, 23, 59, 59)
       )
 
-      ia = instances.find(&.task.==(a)).not_nil!
-      ib = instances.find(&.task.==(b)).not_nil!
-      blocker_i = instances.find(&.task.==(blocker)).not_nil!
+      ia = scheduled_tasks.find(&.task.==(a)).not_nil!
+      ib = scheduled_tasks.find(&.task.==(b)).not_nil!
+      blocker_i = scheduled_tasks.find(&.task.==(blocker)).not_nil!
       ib.start.should be >= ia.finish
       ib.start.should be >= blocker_i.finish
     end
@@ -1130,18 +1128,18 @@ describe "VirtualDate – advanced scheduling" do
 
       scheduler.tasks = [a, b]
 
-      instances = scheduler.build(
+      scheduled_tasks = scheduler.build(
         Time.local(2023, 5, 10),
         Time.local(2023, 5, 11)
       )
 
-      instances.size.should eq 2
-      instances.all? { |i| i.start.hour == 10 }.should be_true
+      scheduled_tasks.size.should eq 2
+      scheduled_tasks.all? { |i| i.start.hour == 10 }.should be_true
     end
   end
 
-  describe "Scheduler effective_on? invariant" do
-    it "ensures all scheduled instances are effectively on" do
+  describe "Scheduler on? invariant" do
+    it "ensures all scheduled scheduled_tasks are effectively on" do
       scheduler = VirtualDate::Scheduler.new
 
       task = VirtualDate.new
@@ -1152,19 +1150,19 @@ describe "VirtualDate – advanced scheduling" do
 
       scheduler.tasks << task
 
-      instances = scheduler.build(
+      scheduled_tasks = scheduler.build(
         Time.local(2023, 5, 10),
         Time.local(2023, 5, 11)
       )
 
-      instances.each do |i|
-        task.effective_on?(i.start).should be_true
+      scheduled_tasks.each do |i|
+        task.on?(i.start).should be_true
       end
     end
   end
 
   describe "Scheduler explanations" do
-    it "attaches explanations to task instances" do
+    it "attaches explanations to task scheduled_tasks" do
       scheduler = VirtualDate::Scheduler.new
 
       task = VirtualDate.new
@@ -1175,12 +1173,12 @@ describe "VirtualDate – advanced scheduling" do
 
       scheduler.tasks << task
 
-      instances = scheduler.build(
+      scheduled_tasks = scheduler.build(
         Time.local(2023, 5, 10),
         Time.local(2023, 5, 11)
       )
 
-      inst = instances.first
+      inst = scheduled_tasks.first
       inst.explanation.should_not be_nil
       inst.explanation.lines.should_not be_empty
     end
@@ -1226,13 +1224,13 @@ describe "VirtualDate – advanced scheduling" do
 
       scheduler.tasks = [low, high]
 
-      instances = scheduler.build(
+      scheduled_tasks = scheduler.build(
         Time.local(2023, 5, 10),
         Time.local(2023, 5, 11)
       )
 
-      hi = instances.find(&.task.id.==("high")).not_nil!
-      lo = instances.find(&.task.id.==("low")).not_nil!
+      hi = scheduled_tasks.find(&.task.id.==("high")).not_nil!
+      lo = scheduled_tasks.find(&.task.id.==("low")).not_nil!
 
       hi.start.hour.should eq 9
       lo.start.should be >= hi.finish
@@ -1260,15 +1258,15 @@ describe "VirtualDate – advanced scheduling" do
 
     scheduler.tasks = [fixed, aggressive]
 
-    instances = scheduler.build(
+    scheduled_tasks = scheduler.build(
       Time.local(2023, 5, 10),
       Time.local(2023, 5, 11)
     )
 
-    instances.size.should eq 2
+    scheduled_tasks.size.should eq 2
 
-    f = instances.find(&.task.id.==("fixed")).not_nil!
-    a = instances.find(&.task.id.==("aggressive")).not_nil!
+    f = scheduled_tasks.find(&.task.id.==("fixed")).not_nil!
+    a = scheduled_tasks.find(&.task.id.==("aggressive")).not_nil!
 
     f.start.hour.should eq 9
     a.start.should be >= f.finish
@@ -1285,12 +1283,12 @@ describe "VirtualDate – advanced scheduling" do
 
       scheduler.tasks << task
 
-      instances = scheduler.build(
+      scheduled_tasks = scheduler.build(
         Time.local(2023, 5, 10),
         Time.local(2023, 5, 11)
       )
 
-      instances.should be_empty
+      scheduled_tasks.should be_empty
     end
 
     it "allows scheduling that finishes exactly at deadline" do
@@ -1303,13 +1301,13 @@ describe "VirtualDate – advanced scheduling" do
 
       scheduler.tasks << task
 
-      instances = scheduler.build(
+      scheduled_tasks = scheduler.build(
         Time.local(2023, 5, 10),
         Time.local(2023, 5, 11)
       )
 
-      instances.size.should eq 1
-      instances.first.finish.should eq task.deadline
+      scheduled_tasks.size.should eq 1
+      scheduled_tasks.first.finish.should eq task.deadline
     end
   end
 
@@ -1329,19 +1327,19 @@ describe "VirtualDate – advanced scheduling" do
 
     scheduler.tasks = [b, a]
 
-    instances = scheduler.build(
+    scheduled_tasks = scheduler.build(
       Time.local(2023, 5, 10),
       Time.local(2023, 5, 10, 23, 59, 59)
     )
 
-    ia = instances.find(&.task.id.==("a")).not_nil!
-    ib = instances.find(&.task.id.==("b")).not_nil!
+    ia = scheduled_tasks.find(&.task.id.==("a")).not_nil!
+    ib = scheduled_tasks.find(&.task.id.==("b")).not_nil!
 
     ib.start.should be >= ia.finish
   end
 
   describe "Scheduler explanations" do
-    it "attaches explanations to task instances" do
+    it "attaches explanations to task scheduled_tasks" do
       scheduler = VirtualDate::Scheduler.new
 
       task = VirtualDate.new("explain")
@@ -1356,12 +1354,12 @@ describe "VirtualDate – advanced scheduling" do
 
       scheduler.tasks = [blocker, task]
 
-      instances = scheduler.build(
+      scheduled_tasks = scheduler.build(
         Time.local(2023, 5, 10),
         Time.local(2023, 5, 11)
       )
 
-      inst = instances.find(&.task.id.==("explain")).not_nil!
+      inst = scheduled_tasks.find(&.task.id.==("explain")).not_nil!
       inst.explanation.lines.should_not be_empty
     end
   end
@@ -1376,12 +1374,12 @@ describe "VirtualDate – advanced scheduling" do
 
       scheduler.tasks << task
 
-      instances = scheduler.build(
+      scheduled_tasks = scheduler.build(
         Time.local(2023, 5, 10),
         Time.local(2023, 5, 11)
       )
 
-      ics = VirtualDate::ICS.export(instances)
+      ics = VirtualDate::ICS.export(scheduled_tasks)
 
       ics.should contain("BEGIN:VCALENDAR")
       ics.should contain("BEGIN:VEVENT")
