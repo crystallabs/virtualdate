@@ -25,7 +25,7 @@ scheduler = VirtualDate::Scheduler.new(vdates)
       }
 
       puts "\t#{i.vdate.id} @ #{i.start}"
-      puts "\t" + i.explanation.to_s
+      puts "\t" + i.explanation.lines.join("\n\t")
     end
 
   # This repeats, and only the last date is in the file

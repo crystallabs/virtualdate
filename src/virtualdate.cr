@@ -313,7 +313,7 @@ class VirtualDate
           if dependency_floor
             if dependency_floor && dependency_floor > candidate.start
               candidate = Candidate.new(vdate, dependency_floor)
-              candidate.explanation.add("Shifted to #{dependency_floor} to satisfy dependencies")
+              candidate.explanation.add("Shifted from #{candidate.start} to #{dependency_floor} to satisfy dependency constraints")
             end
           end
 
@@ -500,7 +500,7 @@ class VirtualDate
       if duration == 0.seconds
         return nil if start > horizon
         scheduled = Scheduled.new(vdate, start)
-        scheduled.explanation.add "Scheduled zero-duration vdate at #{start}\n"
+        scheduled.explanation.add "Scheduled zero-duration vdate at #{start}"
 
         if scheduled.explanation.lines.empty?
           scheduled.explanation.add("Scheduled (no additional details)")
@@ -517,7 +517,7 @@ class VirtualDate
           return nil
         end
 
-        candidate = Scheduled.new(vdate, start)
+        candidate = Scheduled.new(vdate, start, candidate.explanation)
 
         if deadline = vdate.deadline
           deadline_time =
@@ -529,14 +529,14 @@ class VirtualDate
             end
 
           if finish > deadline_time
-            candidate.explanation.add "Rejected: finish #{finish} exceeds hard deadline #{deadline_time}\n"
+            candidate.explanation.add "Rejected: finish #{finish} exceeds hard deadline #{deadline_time}"
             return nil
           end
         end
 
         # Check parallelism / conflicts
         if acceptable_parallelism?(candidate, scheduled_vdates)
-          candidate.explanation.add "Scheduled at #{start}, no conflicts, parallelism OK\n"
+          candidate.explanation.add "Scheduled at #{start}, no conflicts, parallelism OK"
 
           if candidate.explanation.lines.empty?
             candidate.explanation.add("Scheduled (no additional details)")
@@ -565,24 +565,24 @@ class VirtualDate
             # Otherwise respect fixed semantics
             return nil if vdate.fixed
 
-            candidate.explanation.add "Yielded to fixed vdate #{conflict.vdate.id}, moved to #{conflict.finish}\n"
+            candidate.explanation.add "Yielded to fixed vdate #{conflict.vdate.id} (#{conflict.start}-#{conflict.finish}), shifted from #{start} to #{conflict.finish}"
             start = conflict.finish
             next
           end
 
           if vdate.fixed
             scheduled_vdates.delete(conflict)
-            candidate.explanation.add "Displaced movable vdate #{conflict.vdate.id} because this vdate is fixed\n"
+            candidate.explanation.add "Displaced movable vdate #{conflict.vdate.id} because this vdate is fixed"
             next
           end
 
           # Priority comparison
           if vdate.priority > conflict.vdate.priority
             scheduled_vdates.delete(conflict)
-            candidate.explanation.add "Displaced lower-priority vdate #{conflict.vdate.id} (priority #{conflict.vdate.priority})\n"
+            candidate.explanation.add "Displaced lower-priority vdate #{conflict.vdate.id} (priority #{conflict.vdate.priority})"
             next
           elsif vdate.priority < conflict.vdate.priority
-            candidate.explanation.add "Yielded to higher-priority vdate #{conflict.vdate.id}, moved to #{conflict.finish}\n"
+            candidate.explanation.add "Yielded to higher-priority vdate #{conflict.vdate.id}, shifted from #{start} to #{conflict.finish}"
             start = conflict.finish
             next
           end
@@ -715,10 +715,9 @@ class VirtualDate
     getter finish : Time
     property explanation : VirtualDate::Explanation
 
-    def initialize(@vdate : VirtualDate, @start : Time, explanation = nil)
+    def initialize(@vdate : VirtualDate, @start : Time, explanation : VirtualDate::Explanation? = nil)
       @finish = @start + vdate.duration
-      @explanation = VirtualDate::Explanation.new
-      @explanation.add explanation if explanation
+      @explanation = explanation || VirtualDate::Explanation.new
     end
 
     def flags : Array(String)
