@@ -18,18 +18,16 @@ And run `shards install` or just `shards`.
 ## Introduction
 
 VirtualDate is a companion project to [virtualtime](https://github.com/crystallabs/virtualtime).
-It is used for complex and flexible, and often recurring, time/event scheduling.
-
-VirtualTime implements the low-level time matching and finding/generating component.
 
 VirtualDate implements the high-level part, the actual items one might want to schedule, with
-additional options and fields.
+additional options and fields, and with the support for complex and flexible, and often recurring,
+time/event scheduling.
 
 The class is intentionally called `VirtualDate` not to imply a particular type or purpose
 (i.e. it can be a task, event, recurring appointment, reminder, etc.)
 
 Likewise, it does not contain any task/event-specific properties -- it only concerns itself with
-the matching and scheduling aspect.
+the scheduling aspect.
 
 ## Usage
 
@@ -127,18 +125,25 @@ reschedule it by shifting it by certain amount of time before or after the origi
 
 Thus, altogether class `VirtualDate` has the following properties:
 
-- `start`, an absolute start time, before which the VirtualDate is never on
-- `stop`, an absolute end time, after which the VirtualDate is never on
-
+- `begin`, an absolute start time, before which the VirtualDate is never on
+- `end`, an absolute end time, after which the VirtualDate is never on
 - `due`, a list of VirtualTimes on which the VirtualDate is on
 - `omit`, a list of VirtualTimes on which the VirtualDate is omitted (not on)
 - `shift`, governing whether, and by how much time, the VirtualDate should be shifted if it falls on an omitted date/time
 - `max_shifts`, a maximum number of shift attempts to make in an attempt to find a suitable rescheduled date and time
 - `max_shift`, a maximum Time::Span by which the VirtualDate can be shifted before being considered unschedulable
-
 - `on`, a property which overrides all other VirtualDate's fields and calculations and directly sets VirtualDate's `on` status
+- `duration`
+- `flags`, i.e. categories/groups/tags
+- `parallel`, how many vdates from the same `flag` group can be scheduled in parallel
+- `stagger`, if scheduling in parallel, by how much time to stagger/sequence/order each parallel vdate
+- `priority`, higher = schedule first
+- `fixed`, whether this vdate is fixed/immovable
+- `id`, unique ID (string)
+- `depends_on`, list of vdates it depends on
+- `deadline`, will fail to schedule if it can't complete before this
 
-If the item's list of due dates is empty, it is considered as always "on".
+If the 's list of due dates is empty, it is considered as always "on".
 If the item's list of omit dates is empty, it is considered as never omitted.
 
 A value of `shift` can be nil, `Boolean`, or`Time::Span`.
@@ -162,14 +167,10 @@ and would not need any `stop` value.
 This functionality is quite redundant with the usual `due` and `omit` dates, is highly experimental,
 and probably not something to be used.
 
-
 ## Scheduling
 
-TODO (and include note on rbtree and list of upcoming events)
+There is support for loading/saving schedule to YAML and exporting to iCal.
 
-## Reminding
-
-TODO (note: reminder = VirtualDate::Reminder)
 
 # Other Projects
 

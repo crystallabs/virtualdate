@@ -81,10 +81,6 @@ class VirtualDate
   @[YAML::Field(converter: VirtualDate::VirtualTimeOrTimeConverter)]
   property deadline : VirtualTime::TimeOrVirtualTime? = nil
 
-  # Soft deadline — scheduler prefers finishing before this
-  @[YAML::Field(converter: VirtualDate::VirtualTimeOrTimeConverter)]
-  property soft_deadline : VirtualTime::TimeOrVirtualTime? = nil
-
   def initialize(@id : String? = "")
   end
 

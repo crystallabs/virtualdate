@@ -1364,6 +1364,27 @@ describe "VirtualDate – advanced scheduling" do
     end
   end
 
+  it "never schedules vdates outside the requested horizon" do
+    scheduler = VirtualDate::Scheduler.new
+
+    vdate = VirtualDate.new
+    vdate.duration = 1.hour
+    vdate.shift = 2.hours
+    vdate.due << VirtualTime.new(hour: 23)
+
+    scheduler.vdates << vdate
+
+    from = Time.local(2023, 5, 10)
+    to = Time.local(2023, 5, 10, 23, 0)
+
+    scheduled = scheduler.build(from, to)
+
+    scheduled.each do |i|
+      i.start.should be >= from
+      i.finish.should be <= to
+    end
+  end
+
   describe "ICS export" do
     it "exports scheduled vdates as valid iCal events" do
       scheduler = VirtualDate::Scheduler.new
@@ -1386,6 +1407,107 @@ describe "VirtualDate – advanced scheduling" do
       ics.should contain("SUMMARY:ics-vdate")
       ics.should contain("END:VEVENT")
       ics.should contain("END:VCALENDAR")
+    end
+  end
+
+  it "on? returns false when strict_on? is nil" do
+    vd = VirtualDate.new
+    vd.begin = Time.local(2023, 5, 10)
+
+    vd.on?(Time.local(2023, 5, 9)).should be_false
+  end
+
+  it "on? does not treat true as inverse-reachable" do
+    vd = VirtualDate.new
+    date = Time.local(2023, 5, 10)
+
+    vd.due << VirtualTime.from_time(date)
+    vd.shift = 1.hour
+
+    vd.strict_on?(date).should be_true
+    vd.on?(date + 1.hour).should be_false
+  end
+
+  it "treats max_shift = 0 as no shifting allowed" do
+    vd = VirtualDate.new
+    date = Time.local(2023, 5, 10)
+
+    vd.due << VirtualTime.from_time(date)
+    vd.omit << VirtualTime.from_time(date)
+    vd.shift = 1.hour
+
+    vd.strict_on?(date, max_shift: 0.seconds).should be_false
+  end
+
+  it "treats max_shifts = 0 as shifts exhausted" do
+    vd = VirtualDate.new
+    date = Time.local(2023, 5, 10)
+
+    vd.due << VirtualTime.from_time(date)
+    vd.omit << VirtualTime.from_time(date)
+    vd.shift = 1.hour
+
+    vd.strict_on?(date, max_shifts: 0).should be_false
+  end
+
+  it "ensures staggered scheduled vdates are not strictly invalid" do
+    scheduler = VirtualDate::Scheduler.new
+
+    vdate = VirtualDate.new
+    vdate.due << VirtualTime.from_time(Time.local(2023, 5, 10, 10, 0))
+    vdate.omit << VirtualTime.from_time(Time.local(2023, 5, 10, 10, 0))
+    vdate.shift = 1.hour
+    vdate.parallel = 2
+    vdate.stagger = 30.minutes
+
+    scheduler.vdates << vdate
+
+    scheduled = scheduler.build(
+      Time.local(2023, 5, 10),
+      Time.local(2023, 5, 11)
+    )
+
+    scheduled.each do |i|
+      # The correct invariant:
+      vdate.strict_on?(i.start).should_not be_false
+    end
+  end
+
+  it "fails scheduling when deadline makes placement impossible" do
+    scheduler = VirtualDate::Scheduler.new
+
+    blocker = VirtualDate.new
+    blocker.duration = 2.hours
+    blocker.fixed = true
+    blocker.flags << "work"
+    blocker.due << VirtualTime.new(hour: 9)
+
+    doomed = VirtualDate.new
+    doomed.duration = 1.hour
+    doomed.deadline = Time.local(2023, 5, 10, 10, 0)
+    doomed.flags << "work"
+    doomed.shift = 30.minutes
+    doomed.due << VirtualTime.new(hour: 9)
+
+    scheduler.vdates = [blocker, doomed]
+
+    scheduled = scheduler.build(
+      Time.local(2023, 5, 10),
+      Time.local(2023, 5, 11)
+    )
+
+    scheduled.map(&.vdate).should_not contain(doomed)
+  end
+
+  it "rejects duplicate keys at root mapping level" do
+    yaml = <<-YAML
+schema_version: 2
+schema_version: 2
+vdates: []
+YAML
+
+    expect_raises(ArgumentError) do
+      VirtualDate::VirtualDateFile.load(yaml)
     end
   end
 end
