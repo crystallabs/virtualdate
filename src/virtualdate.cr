@@ -296,12 +296,12 @@ class VirtualDate
     # - granularity: how frequently to generate candidates from due rules (defaults to 1 minute)
     # - max_candidates: safety limit to avoid infinite generation for very broad rules
     #
-    # Returns: Array(ScheduledVDate), sorted by start time.
-    def build(from : Time, to : Time) : Array(ScheduledVDate)
-      scheduled_vdates = [] of ScheduledVDate
+    # Returns: Array(Scheduled), sorted by start time.
+    def build(from : Time, to : Time) : Array(Scheduled)
+      scheduled_vdates = [] of Scheduled
 
       ordered = order_vdates_by_dependencies(@vdates)
-      scheduled_index = {} of VirtualDate => ScheduledVDate
+      scheduled_index = {} of VirtualDate => Scheduled
 
       ordered.each do |vdate|
         dependency_floor = vdate.depends_on.any? ? earliest_start_time_after_dependencies(vdate, scheduled_index) : nil
@@ -400,7 +400,7 @@ class VirtualDate
 
     # Finds earliest time a vdate can start, but not before its dependencies
     # are completed.
-    private def earliest_start_time_after_dependencies(vdate : VirtualDate, scheduled_index : Hash(VirtualDate, VirtualDate::ScheduledVDate)) : Time?
+    private def earliest_start_time_after_dependencies(vdate : VirtualDate, scheduled_index : Hash(VirtualDate, VirtualDate::Scheduled)) : Time?
       finishes = [] of Time
 
       vdate.depends_on.each do |dep_vdate|
@@ -410,11 +410,6 @@ class VirtualDate
       end
 
       finishes.max?
-    end
-
-    # Returns start + duration
-    private def vdate_finish(scheduled_vdate : ScheduledVDate) : Time
-      scheduled_vdate.start + (scheduled_vdate.vdate.duration || 0.seconds)
     end
 
     # Finds earliest valid start time according to VirtualDate#on?
@@ -492,7 +487,7 @@ class VirtualDate
     end
 
     # True if `vdate` is considered “on” at `time` in the produced schedule.
-    def on_in_schedule?(scheduled_vdates : Array(ScheduledVDate), vdate : VirtualDate, time : Time) : Bool
+    def on_in_schedule?(scheduled_vdates : Array(Scheduled), vdate : VirtualDate, time : Time) : Bool
       scheduled_vdates.any? do |i|
         next false unless i.vdate == vdate
 
@@ -506,14 +501,14 @@ class VirtualDate
 
     # Schedules a vdate, resolving conflicts by shifting forward (using vdate.shift when Time::Span),
     # respecting vdate.fixed and max_shift/max_shifts.
-    def schedule_candidate(candidate : Candidate, scheduled_vdates : Array(ScheduledVDate), *, horizon : Time) : ScheduledVDate?
+    def schedule_candidate(candidate : Candidate, scheduled_vdates : Array(Scheduled), *, horizon : Time) : Scheduled?
       vdate = candidate.vdate
       start = candidate.start
       duration = vdate.duration || 0.seconds
 
       if duration == 0.seconds
         return nil if start > horizon
-        scheduled = ScheduledVDate.new(vdate, start)
+        scheduled = Scheduled.new(vdate, start)
         scheduled.explanation.add "- Scheduled instant vdate at #{start}\n"
         return scheduled
       end
@@ -524,7 +519,7 @@ class VirtualDate
         # Horizon guard
         return nil if finish > horizon
 
-        candidate = ScheduledVDate.new(vdate, start)
+        candidate = Scheduled.new(vdate, start)
 
         if deadline = vdate.deadline
           deadline_time =
@@ -613,7 +608,7 @@ class VirtualDate
     end
 
     # Enforces per-vdate parallelism across overlapping scheduled_vdates sharing flags.
-    private def acceptable_parallelism?(candidate : ScheduledVDate, scheduled_vdates : Array(ScheduledVDate)) : Bool
+    private def acceptable_parallelism?(candidate : Scheduled, scheduled_vdates : Array(Scheduled)) : Bool
       c_start = candidate.start
       duration = candidate.vdate.duration || 0.seconds
       c_end = c_start + duration
@@ -665,7 +660,7 @@ class VirtualDate
   end
 
   # A concrete scheduled candidate of a VirtualDate vdate.
-  class ScheduledVDate
+  class Scheduled
     getter vdate : VirtualDate
     getter start : Time
     getter finish : Time
@@ -1115,7 +1110,7 @@ class VirtualDate
     ICS_TIME_FORMAT = Time::Format.new("%Y%m%dT%H%M%SZ")
 
     def self.export(
-      scheduled_vdates : Array(ScheduledVDate),
+      scheduled_vdates : Array(Scheduled),
       *,
       calendar_name : String = "VirtualDate Schedule",
     ) : String
@@ -1137,7 +1132,7 @@ class VirtualDate
       lines.join("\r\n") + "\r\n"
     end
 
-    private def self.event(inst : ScheduledVDate, now : Time) : Array(String)
+    private def self.event(inst : Scheduled, now : Time) : Array(String)
       uid = "#{inst.vdate.id}-#{inst.start.to_unix}@virtualdate"
 
       description = String.build do |io|
@@ -1160,7 +1155,7 @@ class VirtualDate
       ].compact
     end
 
-    private def self.categories(inst : ScheduledVDate) : String?
+    private def self.categories(inst : Scheduled) : String?
       return nil if inst.vdate.flags.empty?
       "CATEGORIES:#{inst.vdate.flags.map { |f| escape(f) }.join(",")}"
     end
