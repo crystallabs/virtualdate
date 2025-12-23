@@ -284,6 +284,8 @@ class VirtualDate
       @vdates.each do |vdate|
         vdate.resolve_dependencies!(index)
       end
+
+      order_vdates_by_dependencies(@vdates)
     end
 
     # Produces scheduled vdates in [from, to).
@@ -294,6 +296,8 @@ class VirtualDate
     #
     # Returns: Array(Scheduled), sorted by start time.
     def build(from : Time, to : Time) : Array(Scheduled)
+      validate_no_dependency_cycles!
+
       scheduled_vdates = [] of Scheduled
 
       ordered = order_vdates_by_dependencies(@vdates)
@@ -307,7 +311,10 @@ class VirtualDate
 
         candidates.each do |candidate|
           if dependency_floor
-            candidate = Candidate.new(vdate, dependency_floor) if dependency_floor > candidate.start
+            if dependency_floor && dependency_floor > candidate.start
+              candidate = Candidate.new(vdate, dependency_floor)
+              candidate.explanation.add("Shifted to #{dependency_floor} to satisfy dependencies")
+            end
           end
 
           scheduled_vdate = schedule_candidate(candidate, scheduled_vdates, horizon: to)
@@ -394,6 +401,34 @@ class VirtualDate
       result
     end
 
+    # Finds earliest start time based on the vdate alone, not taking into account dependencies.
+    # In essence, vdate start = max( earliest_start_time, earliest_start_time_after_dependencies)
+    private def earliest_start_time(vdate : VirtualDate, from : Time, to : Time) : Time?
+      t = from
+      iterations = 0
+      max_iterations = 10_000
+
+      while t <= to
+        iterations += 1
+        raise ArgumentError.new("earliest_start_time exceeded iteration limit") if iterations > max_iterations
+
+        r = vdate.strict_on?(t)
+
+        case r
+        when true
+          return t
+        when Time::Span
+          nt = t + r
+          return nt if nt <= to
+          return nil
+        else
+          t += 1.minute
+        end
+      end
+
+      nil
+    end
+
     # Finds earliest time a vdate can start, but not before its dependencies
     # are completed.
     private def earliest_start_time_after_dependencies(vdate : VirtualDate, scheduled_index : Hash(VirtualDate, VirtualDate::Scheduled)) : Time?
@@ -432,7 +467,7 @@ class VirtualDate
       unless vdate.stagger && vdate.parallel > 1
         # Apply omit check to the single produced candidate
         candidate = Candidate.new(vdate, start)
-        candidate.explanation.add("Matched due rule at #{start}")
+        candidate.explanation.add("Initial candidate at #{start}")
         candidates << candidate
         return candidates
       end
@@ -447,52 +482,12 @@ class VirtualDate
         next if vdate.omit_on?(t)
 
         candidate = Candidate.new(vdate, t)
-        candidate.explanation.add("Matched due rule at #{t} (staggered)")
+        # candidate.explanation.add("Matched due rule at #{t} (staggered)")
+        candidate.explanation.add("Initial staggered candidate ##{i + 1} at #{t} (stagger=#{stagger})")
         candidates << candidate
       end
 
       candidates
-    end
-
-    # Finds earliest start time based on the vdate alone, not taking into account dependencies.
-    # In essence, vdate start = max( earliest_start_time, earliest_start_time_after_dependencies)
-    private def earliest_start_time(vdate : VirtualDate, from : Time, to : Time) : Time?
-      t = from
-      iterations = 0
-      max_iterations = 10_000
-
-      while t <= to
-        iterations += 1
-        raise ArgumentError.new("earliest_start_time exceeded iteration limit") if iterations > max_iterations
-
-        r = vdate.strict_on?(t)
-
-        case r
-        when true
-          return t
-        when Time::Span
-          nt = t + r
-          return nt if nt <= to
-          return nil
-        else
-          t += 1.minute
-        end
-      end
-
-      nil
-    end
-
-    # True if `vdate` is considered “on” at `time` in the produced schedule.
-    def on_in_schedule?(scheduled_vdates : Array(Scheduled), vdate : VirtualDate, time : Time) : Bool
-      scheduled_vdates.any? do |i|
-        next false unless i.vdate == vdate
-
-        if i.start == i.finish
-          time == i.start
-        else
-          i.start <= time && time < i.finish
-        end
-      end
     end
 
     # Schedules a vdate, resolving conflicts by shifting forward (using vdate.shift when Time::Span),
@@ -505,7 +500,11 @@ class VirtualDate
       if duration == 0.seconds
         return nil if start > horizon
         scheduled = Scheduled.new(vdate, start)
-        scheduled.explanation.add "- Scheduled instant vdate at #{start}\n"
+        scheduled.explanation.add "Scheduled zero-duration vdate at #{start}\n"
+
+        if scheduled.explanation.lines.empty?
+          scheduled.explanation.add("Scheduled (no additional details)")
+        end
         return scheduled
       end
 
@@ -513,7 +512,10 @@ class VirtualDate
         finish = start + duration
 
         # Horizon guard
-        return nil if finish > horizon
+        if finish > horizon
+          candidate.explanation.add("Rejected: finish #{finish} exceeds horizon #{horizon}")
+          return nil
+        end
 
         candidate = Scheduled.new(vdate, start)
 
@@ -527,14 +529,18 @@ class VirtualDate
             end
 
           if finish > deadline_time
-            candidate.explanation.add "- Rejected: finish #{finish} exceeds hard deadline #{deadline_time}\n"
+            candidate.explanation.add "Rejected: finish #{finish} exceeds hard deadline #{deadline_time}\n"
             return nil
           end
         end
 
         # Check parallelism / conflicts
         if acceptable_parallelism?(candidate, scheduled_vdates)
-          candidate.explanation.add "- Scheduled at #{start} without conflicts\n"
+          candidate.explanation.add "Scheduled at #{start}, no conflicts, parallelism OK\n"
+
+          if candidate.explanation.lines.empty?
+            candidate.explanation.add("Scheduled (no additional details)")
+          end
           return candidate
         end
 
@@ -548,31 +554,35 @@ class VirtualDate
           if conflict.vdate.fixed
             # If vdate has dependents, it must be scheduled even if it conflicts
             if has_dependents?(vdate)
-              candidate.explanation.add "Placed despite conflicts because other vdates depend on it"
+              candidate.explanation.add("Scheduled despite conflicts because dependent vdates require it")
+
+              if candidate.explanation.lines.empty?
+                candidate.explanation.add("Scheduled (no additional details)")
+              end
               return candidate
             end
 
             # Otherwise respect fixed semantics
             return nil if vdate.fixed
 
-            candidate.explanation.add "- Yielded to fixed vdate #{conflict.vdate.id}, moved after #{conflict.finish}\n"
+            candidate.explanation.add "Yielded to fixed vdate #{conflict.vdate.id}, moved to #{conflict.finish}\n"
             start = conflict.finish
             next
           end
 
           if vdate.fixed
             scheduled_vdates.delete(conflict)
-            candidate.explanation.add "- Displaced movable vdate #{conflict.vdate.id} (this vdate is fixed)\n"
+            candidate.explanation.add "Displaced movable vdate #{conflict.vdate.id} because this vdate is fixed\n"
             next
           end
 
           # Priority comparison
           if vdate.priority > conflict.vdate.priority
             scheduled_vdates.delete(conflict)
-            candidate.explanation.add "- Displaced lower-priority vdate #{conflict.vdate.id}\n"
+            candidate.explanation.add "Displaced lower-priority vdate #{conflict.vdate.id} (priority #{conflict.vdate.priority})\n"
             next
           elsif vdate.priority < conflict.vdate.priority
-            candidate.explanation.add "- Yielded to higher-priority vdate #{conflict.vdate.id}, moved after #{conflict.finish}\n"
+            candidate.explanation.add "Yielded to higher-priority vdate #{conflict.vdate.id}, moved to #{conflict.finish}\n"
             start = conflict.finish
             next
           end
@@ -587,9 +597,22 @@ class VirtualDate
             1.minute
           end
 
-        candidate.explanation.add "- Conflict unresolved, shifted forward by #{shift_span}\n"
+        candidate.explanation.add("Conflict unresolved; shifted forward by #{shift_span} to #{start + shift_span}")
 
         start += shift_span
+      end
+    end
+
+    # True if `vdate` is considered “on” at `time` in the produced schedule.
+    def on_in_schedule?(scheduled_vdates : Array(Scheduled), vdate : VirtualDate, time : Time) : Bool
+      scheduled_vdates.any? do |i|
+        next false unless i.vdate == vdate
+
+        if i.start == i.finish
+          time == i.start
+        else
+          i.start <= time && time < i.finish
+        end
       end
     end
 
@@ -642,6 +665,36 @@ class VirtualDate
 
       true
     end
+
+    # Ensure there are no depdendency cycles or raise.
+    private def validate_no_dependency_cycles!
+      visiting = Set(VirtualDate).new
+      visited = Set(VirtualDate).new
+
+      @vdates.each do |vdate|
+        dfs_check!(vdate, visiting, visited)
+      end
+    end
+
+    # Depth-first search. Checks for dependency cycles.
+    private def dfs_check!(
+      vdate : VirtualDate,
+      visiting : Set(VirtualDate),
+      visited : Set(VirtualDate),
+    )
+      return if visited.includes?(vdate)
+
+      if visiting.includes?(vdate)
+        raise ArgumentError.new("Dependency cycle detected involving '#{vdate.id}'")
+      end
+
+      visiting << vdate
+      vdate.depends_on.each do |dep|
+        dfs_check!(dep, visiting, visited)
+      end
+      visiting.delete(vdate)
+      visited << vdate
+    end
   end
 
   # A candidate for scheduling, points to vdate, time, and an explanation buffer
@@ -688,11 +741,17 @@ class VirtualDate
     end
 
     def add(msg : String)
+      if @lines.size > MAX_LINES
+        return false
+      end
+
       @lines << msg
-      if @lines.size >= MAX_LINES
+
+      if @lines.size == MAX_LINES
         @lines << "Explanation buffer overflow (limit: #{MAX_LINES} messages)"
         return false
       end
+
       true
     end
 
@@ -841,24 +900,22 @@ class VirtualDate
         errors: errors
       )
 
-      unless node.nodes.any? { |n| n.is_a?(YAML::Nodes::Sequence) }
-        pair =
-          node.nodes
-            .each_slice(2)
-            .find do |slice|
-              key = slice[0]
-              key.is_a?(YAML::Nodes::Scalar) && key.value == "vdates"
-            end
+      pair =
+        node.nodes
+          .each_slice(2)
+          .find do |slice|
+            key = slice[0]
+            key.is_a?(YAML::Nodes::Scalar) && key.value == "vdates"
+          end
 
-        vdates_node = pair ? pair[1] : nil
+      vdates_node = pair ? pair[1] : nil
 
-        unless vdates_node.is_a?(YAML::Nodes::Sequence)
-          errors << YamlError.new("'vdates' must be a sequence", node)
-          return
-        end
-
-        validate_vdates(vdates_node.as(YAML::Nodes::Sequence), errors)
+      unless vdates_node.is_a?(YAML::Nodes::Sequence)
+        errors << YamlError.new("'vdates' must be a sequence", node)
+        return
       end
+
+      validate_vdates(vdates_node, errors)
     end
 
     private def self.validate_mapping_keys(
@@ -989,8 +1046,10 @@ class VirtualDate
   # Various unspecific helpers below
 
   def resolve_dependencies!(index : Hash(String, VirtualDate))
+    return if @depends_on_ids.empty?
+
     @depends_on = @depends_on_ids.compact_map do |id|
-      index[id]?
+      index[id]? || raise ArgumentError.new("Unknown dependency '#{id}'")
     end
   end
 

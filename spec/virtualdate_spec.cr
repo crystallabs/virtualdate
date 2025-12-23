@@ -1510,4 +1510,77 @@ YAML
       VirtualDate::VirtualDateFile.load(yaml)
     end
   end
+
+  it "resolve distinguishes nil (not applicable) from false (unschedulable)" do
+    date = Time.local(2023, 5, 10)
+
+    vd = VirtualDate.new
+    vd.begin = Time.local(2023, 5, 11)
+
+    vd.resolve(date).should be_nil
+
+    vd2 = VirtualDate.new
+    vd2.due << VirtualTime.from_time(date)
+    vd2.omit << VirtualTime.from_time(date)
+    vd2.shift = false
+
+    vd2.resolve(date).should be_false
+  end
+
+  it "on? with shift = true treats omitted times as directly on" do
+    date = Time.local(2023, 5, 10, 10, 0)
+
+    vd = VirtualDate.new
+    vd.due << VirtualTime.from_time(date)
+    vd.omit << VirtualTime.from_time(date)
+    vd.shift = true
+
+    vd.on?(date).should be_true
+  end
+
+  it "schedules zero-duration vdates without blocking others" do
+    scheduler = VirtualDate::Scheduler.new
+
+    instant = VirtualDate.new
+    instant.duration = 0.seconds
+    instant.due << VirtualTime.new(hour: 10)
+
+    long = VirtualDate.new
+    long.duration = 2.hours
+    long.due << VirtualTime.new(hour: 10)
+
+    scheduler.vdates = [instant, long]
+
+    scheduled = scheduler.build(
+      Time.local(2023, 5, 10),
+      Time.local(2023, 5, 11)
+    )
+
+    scheduled.size.should eq 2
+  end
+
+  it "rejects duplicate keys inside vdate mapping" do
+    yaml = <<-YAML
+schema_version: 2
+vdates:
+  - id: a
+    id: b
+YAML
+
+    expect_raises(ArgumentError) do
+      VirtualDate::VirtualDateFile.load(yaml)
+    end
+  end
+
+  it "detects dependency cycles" do
+    a = VirtualDate.new("a")
+    b = VirtualDate.new("b")
+
+    a.depends_on << b
+    b.depends_on << a
+
+    expect_raises(ArgumentError) do
+      scheduler = VirtualDate::Scheduler.new([a, b])
+    end
+  end
 end
