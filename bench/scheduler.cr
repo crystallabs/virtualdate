@@ -18,17 +18,17 @@ from = Time.local(2023, 5, 10, 0, 0, 0, location: loc)
 to = Time.local(2023, 5, 11, 0, 0, 0, location: loc)
 
 # --------------------------------------------------
-# 1. Many simple tasks
+# 1. Many simple vdates
 # --------------------------------------------------
 
 100.times do |i|
   t = VirtualDate.new("simple-#{i}")
   t.duration = 15.minutes
   t.due << VirtualTime.new(hour: 9)
-  scheduler.tasks << t
+  scheduler.vdates << t
 end
 
-measure("100 simple non-conflicting tasks") do
+measure("100 simple non-conflicting vdates") do
   scheduler.build(from, to)
 end
 
@@ -46,10 +46,10 @@ scheduler = VirtualDate::Scheduler.new
   t.parallel = 1
   t.priority = i
   t.due << VirtualTime.new(hour: 9)
-  scheduler.tasks << t
+  scheduler.vdates << t
 end
 
-measure("50 conflicting tasks with shifts") do
+measure("50 conflicting vdates with shifts") do
   scheduler.build(from, to)
 end
 
@@ -65,16 +65,16 @@ prev = nil
   t.duration = 10.minutes
   t.due << VirtualTime.new(hour: 9)
   t.depends_on << prev if prev
-  scheduler.tasks << t
+  scheduler.vdates << t
   prev = t
 end
 
-measure("20-task dependency chain") do
+measure("20-vdate dependency chain") do
   scheduler.build(from, to)
 end
 
 # --------------------------------------------------
-# 4. Staggered parallel tasks
+# 4. Staggered parallel vdates
 # --------------------------------------------------
 
 scheduler = VirtualDate::Scheduler.new
@@ -84,7 +84,7 @@ t.parallel = 10
 t.stagger = 5.minutes
 t.duration = 10.minutes
 t.due << VirtualTime.new(hour: 10)
-scheduler.tasks << t
+scheduler.vdates << t
 
 measure("Staggered parallel scheduling (10)") do
   scheduler.build(from, to)

@@ -696,28 +696,28 @@ describe "VirtualDate – advanced scheduling" do
   end
 
   describe "Scheduler basic scheduling" do
-    it "schedules a single task with duration" do
+    it "schedules a single vdate with duration" do
       scheduler = VirtualDate::Scheduler.new
 
-      task = VirtualDate.new
-      task.duration = 1.hour
-      task.due << VirtualTime.new(hour: 10)
+      vdate = VirtualDate.new
+      vdate.duration = 1.hour
+      vdate.due << VirtualTime.new(hour: 10)
 
-      scheduler.tasks << task
+      scheduler.vdates << vdate
 
       from = Time.local(2023, 5, 10, 0, 0, 0)
       to = Time.local(2023, 5, 10, 23, 59, 59)
 
-      scheduled_tasks = scheduler.build(from, to)
+      scheduled_vdates = scheduler.build(from, to)
 
-      scheduled_tasks.size.should eq 1
-      scheduled_tasks[0].start.hour.should eq 10
-      scheduled_tasks[0].finish.should eq scheduled_tasks[0].start + 1.hour
+      scheduled_vdates.size.should eq 1
+      scheduled_vdates[0].start.hour.should eq 10
+      scheduled_vdates[0].finish.should eq scheduled_vdates[0].start + 1.hour
     end
   end
 
   describe "Scheduler conflict resolution via duration" do
-    it "reschedules second task after first when overlapping is not allowed" do
+    it "reschedules second vdate after first when overlapping is not allowed" do
       scheduler = VirtualDate::Scheduler.new
 
       t1 = VirtualDate.new
@@ -734,17 +734,17 @@ describe "VirtualDate – advanced scheduling" do
       t2.shift = 30.minutes
       t2.due << VirtualTime.new(hour: 9)
 
-      scheduler.tasks = [t1, t2]
+      scheduler.vdates = [t1, t2]
 
       from = Time.local(2023, 5, 10)
       to = Time.local(2023, 5, 11)
 
-      scheduled_tasks = scheduler.build(from, to)
+      scheduled_vdates = scheduler.build(from, to)
 
-      scheduled_tasks.size.should eq 2
+      scheduled_vdates.size.should eq 2
 
-      first = scheduled_tasks.find(&.task.==(t1)).not_nil!
-      second = scheduled_tasks.find(&.task.==(t2)).not_nil!
+      first = scheduled_vdates.find(&.vdate.==(t1)).not_nil!
+      second = scheduled_vdates.find(&.vdate.==(t2)).not_nil!
 
       first.start.hour.should eq 9
       first.finish.should eq first.start + 2.hours
@@ -754,7 +754,7 @@ describe "VirtualDate – advanced scheduling" do
   end
 
   describe "Scheduler parallelism rules" do
-    it "allows parallel tasks up to parallel limit per flag" do
+    it "allows parallel vdates up to parallel limit per flag" do
       scheduler = VirtualDate::Scheduler.new
 
       a = VirtualDate.new
@@ -776,22 +776,22 @@ describe "VirtualDate – advanced scheduling" do
       c.shift = 30.minutes
       c.due << VirtualTime.new(hour: 10)
 
-      scheduler.tasks = [a, b, c]
+      scheduler.vdates = [a, b, c]
 
       from = Time.local(2023, 5, 10)
       to = Time.local(2023, 5, 11)
 
-      scheduled_tasks = scheduler.build(from, to)
+      scheduled_vdates = scheduler.build(from, to)
 
-      scheduled_tasks.size.should eq 3
+      scheduled_vdates.size.should eq 3
 
-      starts = scheduled_tasks.map(&.start)
+      starts = scheduled_vdates.map(&.start)
       starts.count { |t| t.hour == 10 && t.minute == 0 }.should eq 2
     end
   end
 
-  describe "Scheduler respects fixed tasks" do
-    it "does not move fixed tasks even if conflicts occur" do
+  describe "Scheduler respects fixed vdates" do
+    it "does not move fixed vdates even if conflicts occur" do
       scheduler = VirtualDate::Scheduler.new
 
       fixed = VirtualDate.new
@@ -808,17 +808,17 @@ describe "VirtualDate – advanced scheduling" do
       movable.shift = 1.hour
       movable.due << VirtualTime.new(hour: 9)
 
-      scheduler.tasks = [fixed, movable]
+      scheduler.vdates = [fixed, movable]
 
       from = Time.local(2023, 5, 10)
       to = Time.local(2023, 5, 11)
 
-      scheduled_tasks = scheduler.build(from, to)
+      scheduled_vdates = scheduler.build(from, to)
 
-      scheduled_tasks.size.should eq 2
+      scheduled_vdates.size.should eq 2
 
-      fixed_i = scheduled_tasks.find(&.task.==(fixed)).not_nil!
-      movable_i = scheduled_tasks.find(&.task.==(movable)).not_nil!
+      fixed_i = scheduled_vdates.find(&.vdate.==(fixed)).not_nil!
+      movable_i = scheduled_vdates.find(&.vdate.==(movable)).not_nil!
 
       fixed_i.start.hour.should eq 9
       movable_i.start.should be >= fixed_i.finish
@@ -826,7 +826,7 @@ describe "VirtualDate – advanced scheduling" do
   end
 
   describe "Scheduler dependencies" do
-    it "schedules dependent task after its dependency" do
+    it "schedules dependent vdate after its dependency" do
       scheduler = VirtualDate::Scheduler.new
 
       a = VirtualDate.new
@@ -838,17 +838,17 @@ describe "VirtualDate – advanced scheduling" do
       b.depends_on << a
       b.due << VirtualTime.new(hour: 9)
 
-      scheduler.tasks = [a, b]
+      scheduler.vdates = [a, b]
 
       from = Time.local(2023, 5, 10)
       to = Time.local(2023, 5, 11)
 
-      scheduled_tasks = scheduler.build(from, to)
+      scheduled_vdates = scheduler.build(from, to)
 
-      scheduled_tasks.size.should eq 2
+      scheduled_vdates.size.should eq 2
 
-      ia = scheduled_tasks.find(&.task.==(a)).not_nil!
-      ib = scheduled_tasks.find(&.task.==(b)).not_nil!
+      ia = scheduled_vdates.find(&.vdate.==(a)).not_nil!
+      ib = scheduled_vdates.find(&.vdate.==(b)).not_nil!
 
       ib.start.should be >= ia.finish
     end
@@ -858,131 +858,131 @@ describe "VirtualDate – advanced scheduling" do
     it "reports on_in_schedule? correctly" do
       scheduler = VirtualDate::Scheduler.new
 
-      task = VirtualDate.new
-      task.duration = 1.hour
-      task.due << VirtualTime.new(hour: 10)
+      vdate = VirtualDate.new
+      vdate.duration = 1.hour
+      vdate.due << VirtualTime.new(hour: 10)
 
-      scheduler.tasks << task
+      scheduler.vdates << vdate
 
       from = Time.local(2023, 5, 10)
       to = Time.local(2023, 5, 11)
 
-      scheduled_tasks = scheduler.build(from, to)
+      scheduled_vdates = scheduler.build(from, to)
 
-      scheduler.on_in_schedule?(scheduled_tasks, task, Time.local(2023, 5, 10, 10, 30)).should be_true
-      scheduler.on_in_schedule?(scheduled_tasks, task, Time.local(2023, 5, 10, 11, 30)).should be_false
+      scheduler.on_in_schedule?(scheduled_vdates, vdate, Time.local(2023, 5, 10, 10, 30)).should be_true
+      scheduler.on_in_schedule?(scheduled_vdates, vdate, Time.local(2023, 5, 10, 11, 30)).should be_false
     end
   end
 
-  it "staggered scheduler creates multiple staggered scheduled_tasks" do
+  it "staggered scheduler creates multiple staggered scheduled_vdates" do
     scheduler = VirtualDate::Scheduler.new
 
-    task = VirtualDate.new
-    task.due << VirtualTime.from_time(Time.local(2023, 5, 10, 10, 0))
-    task.duration = 1.hour
-    task.parallel = 3
-    task.stagger = 30.minutes
+    vdate = VirtualDate.new
+    vdate.due << VirtualTime.from_time(Time.local(2023, 5, 10, 10, 0))
+    vdate.duration = 1.hour
+    vdate.parallel = 3
+    vdate.stagger = 30.minutes
 
-    scheduler.tasks << task
+    scheduler.vdates << vdate
 
-    scheduled_tasks = scheduler.build(
+    scheduled_vdates = scheduler.build(
       Time.local(2023, 5, 10, 0, 0),
       Time.local(2023, 5, 10, 23, 59)
     )
 
-    starts = scheduled_tasks.map(&.start)
+    starts = scheduled_vdates.map(&.start)
 
     starts.should contain(Time.local(2023, 5, 10, 10, 0))
     starts.should contain(Time.local(2023, 5, 10, 10, 30))
     starts.should contain(Time.local(2023, 5, 10, 11, 0))
-    scheduled_tasks.size.should eq 3
+    scheduled_vdates.size.should eq 3
   end
 
   it "ignores stagger when parallel is 1" do
     scheduler = VirtualDate::Scheduler.new
 
-    task = VirtualDate.new
-    task.due << VirtualTime.from_time(Time.local(2023, 5, 10, 9, 0))
-    task.duration = 1.hour
-    task.parallel = 1
-    task.stagger = 15.minutes
+    vdate = VirtualDate.new
+    vdate.due << VirtualTime.from_time(Time.local(2023, 5, 10, 9, 0))
+    vdate.duration = 1.hour
+    vdate.parallel = 1
+    vdate.stagger = 15.minutes
 
-    scheduler.tasks << task
+    scheduler.vdates << vdate
 
-    scheduled_tasks = scheduler.build(
+    scheduled_vdates = scheduler.build(
       Time.local(2023, 5, 10),
       Time.local(2023, 5, 11)
     )
 
-    scheduled_tasks.size.should eq 1
-    scheduled_tasks.first.start.should eq Time.local(2023, 5, 10, 9, 0)
+    scheduled_vdates.size.should eq 1
+    scheduled_vdates.first.start.should eq Time.local(2023, 5, 10, 9, 0)
   end
 
-  it "does not create staggered scheduled_tasks past the horizon" do
+  it "does not create staggered scheduled_vdates past the horizon" do
     scheduler = VirtualDate::Scheduler.new
 
-    task = VirtualDate.new
-    task.due << VirtualTime.from_time(Time.local(2023, 5, 10, 10, 0))
-    task.parallel = 4
-    task.stagger = 30.minutes
+    vdate = VirtualDate.new
+    vdate.due << VirtualTime.from_time(Time.local(2023, 5, 10, 10, 0))
+    vdate.parallel = 4
+    vdate.stagger = 30.minutes
 
-    scheduler.tasks << task
+    scheduler.vdates << vdate
 
-    scheduled_tasks = scheduler.build(
+    scheduled_vdates = scheduler.build(
       Time.local(2023, 5, 10, 9, 0),
       Time.local(2023, 5, 10, 10, 45)
     )
 
-    scheduled_tasks.map(&.start).should eq [
+    scheduled_vdates.map(&.start).should eq [
       Time.local(2023, 5, 10, 10, 0),
       Time.local(2023, 5, 10, 10, 30),
     ]
   end
 
-  it "applies omit rules independently to staggered scheduled_tasks" do
+  it "applies omit rules independently to staggered scheduled_vdates" do
     scheduler = VirtualDate::Scheduler.new
 
-    task = VirtualDate.new
-    task.due << VirtualTime.from_time(Time.local(2023, 5, 10, 10, 0))
-    task.parallel = 3
-    task.stagger = 30.minutes
+    vdate = VirtualDate.new
+    vdate.due << VirtualTime.from_time(Time.local(2023, 5, 10, 10, 0))
+    vdate.parallel = 3
+    vdate.stagger = 30.minutes
 
     omit = VirtualTime.new
     omit.hour = 10
     omit.minute = 30
-    task.omit << omit
+    vdate.omit << omit
 
-    scheduler.tasks << task
+    scheduler.vdates << vdate
 
-    scheduled_tasks = scheduler.build(
+    scheduled_vdates = scheduler.build(
       Time.local(2023, 5, 10),
       Time.local(2023, 5, 11)
     )
 
-    scheduled_tasks.map(&.start).should eq [
+    scheduled_vdates.map(&.start).should eq [
       Time.local(2023, 5, 10, 10, 0),
       Time.local(2023, 5, 10, 11, 0),
     ]
   end
 
-  it "does not reschedule fixed staggered tasks" do
+  it "does not reschedule fixed staggered vdates" do
     scheduler = VirtualDate::Scheduler.new
 
-    task = VirtualDate.new
-    task.due << VirtualTime.from_time(Time.local(2023, 5, 10, 10, 0))
-    task.parallel = 2
-    task.stagger = 30.minutes
-    task.fixed = true
+    vdate = VirtualDate.new
+    vdate.due << VirtualTime.from_time(Time.local(2023, 5, 10, 10, 0))
+    vdate.parallel = 2
+    vdate.stagger = 30.minutes
+    vdate.fixed = true
 
-    scheduler.tasks << task
+    scheduler.vdates << vdate
 
-    scheduled_tasks = scheduler.build(
+    scheduled_vdates = scheduler.build(
       Time.local(2023, 5, 10),
       Time.local(2023, 5, 11)
     )
 
-    scheduled_tasks.size.should eq 2
-    scheduled_tasks.map(&.start).should eq [
+    scheduled_vdates.size.should eq 2
+    scheduled_vdates.map(&.start).should eq [
       Time.local(2023, 5, 10, 10, 0),
       Time.local(2023, 5, 10, 10, 30),
     ]
@@ -991,12 +991,12 @@ describe "VirtualDate – advanced scheduling" do
   it "raises when stagger is zero or negative" do
     scheduler = VirtualDate::Scheduler.new
 
-    task = VirtualDate.new
-    task.due << VirtualTime.from_time(Time.local(2023, 5, 10, 10, 0))
-    task.parallel = 2
-    task.stagger = 0.seconds
+    vdate = VirtualDate.new
+    vdate.due << VirtualTime.from_time(Time.local(2023, 5, 10, 10, 0))
+    vdate.parallel = 2
+    vdate.stagger = 0.seconds
 
-    scheduler.tasks << task
+    scheduler.vdates << vdate
 
     expect_raises(ArgumentError) do
       scheduler.build(Time.local(2023, 5, 10), Time.local(2023, 5, 11))
@@ -1004,7 +1004,7 @@ describe "VirtualDate – advanced scheduling" do
   end
 
   describe "Scheduler priority handling" do
-    it "prefers higher-priority task when both conflict and are movable" do
+    it "prefers higher-priority vdate when both conflict and are movable" do
       scheduler = VirtualDate::Scheduler.new
 
       low = VirtualDate.new
@@ -1022,15 +1022,15 @@ describe "VirtualDate – advanced scheduling" do
       high.parallel = 1
       high.due << VirtualTime.new(hour: 9)
 
-      scheduler.tasks = [low, high]
+      scheduler.vdates = [low, high]
 
-      scheduled_tasks = scheduler.build(
+      scheduled_vdates = scheduler.build(
         Time.local(2023, 5, 10),
         Time.local(2023, 5, 11)
       )
 
-      hi = scheduled_tasks.find(&.task.==(high)).not_nil!
-      lo = scheduled_tasks.find(&.task.==(low)).not_nil!
+      hi = scheduled_vdates.find(&.vdate.==(high)).not_nil!
+      lo = scheduled_vdates.find(&.vdate.==(low)).not_nil!
 
       hi.start.hour.should eq 9
       lo.start.should be >= hi.finish
@@ -1055,15 +1055,15 @@ describe "VirtualDate – advanced scheduling" do
       movable.shift = 30.minutes
       movable.due << VirtualTime.new(hour: 9)
 
-      scheduler.tasks = [movable, fixed]
+      scheduler.vdates = [movable, fixed]
 
-      scheduled_tasks = scheduler.build(
+      scheduled_vdates = scheduler.build(
         Time.local(2023, 5, 10),
         Time.local(2023, 5, 11)
       )
 
-      fi = scheduled_tasks.find(&.task.==(fixed)).not_nil!
-      mi = scheduled_tasks.find(&.task.==(movable)).not_nil!
+      fi = scheduled_vdates.find(&.vdate.==(fixed)).not_nil!
+      mi = scheduled_vdates.find(&.vdate.==(movable)).not_nil!
 
       fi.start.hour.should eq 9
       mi.start.should be >= fi.finish
@@ -1095,23 +1095,23 @@ describe "VirtualDate – advanced scheduling" do
       b.shift = 30.minutes
       b.due << VirtualTime.new(hour: 9)
 
-      scheduler.tasks = [a, blocker, b]
+      scheduler.vdates = [a, blocker, b]
 
-      scheduled_tasks = scheduler.build(
+      scheduled_vdates = scheduler.build(
         Time.local(2023, 5, 10),
         Time.local(2023, 5, 11, 23, 59, 59)
       )
 
-      ia = scheduled_tasks.find(&.task.==(a)).not_nil!
-      ib = scheduled_tasks.find(&.task.==(b)).not_nil!
-      blocker_i = scheduled_tasks.find(&.task.==(blocker)).not_nil!
+      ia = scheduled_vdates.find(&.vdate.==(a)).not_nil!
+      ib = scheduled_vdates.find(&.vdate.==(b)).not_nil!
+      blocker_i = scheduled_vdates.find(&.vdate.==(blocker)).not_nil!
       ib.start.should be >= ia.finish
       ib.start.should be >= blocker_i.finish
     end
   end
 
   describe "Scheduler parallelism across different flags" do
-    it "does not restrict tasks with different flags" do
+    it "does not restrict vdates with different flags" do
       scheduler = VirtualDate::Scheduler.new
 
       a = VirtualDate.new
@@ -1126,59 +1126,59 @@ describe "VirtualDate – advanced scheduling" do
       b.parallel = 1
       b.due << VirtualTime.new(hour: 10)
 
-      scheduler.tasks = [a, b]
+      scheduler.vdates = [a, b]
 
-      scheduled_tasks = scheduler.build(
+      scheduled_vdates = scheduler.build(
         Time.local(2023, 5, 10),
         Time.local(2023, 5, 11)
       )
 
-      scheduled_tasks.size.should eq 2
-      scheduled_tasks.all? { |i| i.start.hour == 10 }.should be_true
+      scheduled_vdates.size.should eq 2
+      scheduled_vdates.all? { |i| i.start.hour == 10 }.should be_true
     end
   end
 
   describe "Scheduler on? invariant" do
-    it "ensures all scheduled scheduled_tasks are effectively on" do
+    it "ensures all scheduled scheduled_vdates are effectively on" do
       scheduler = VirtualDate::Scheduler.new
 
-      task = VirtualDate.new
-      task.duration = 1.hour
-      task.due << VirtualTime.new(hour: 10)
-      task.omit << VirtualTime.new(hour: 10)
-      task.shift = 1.hour
+      vdate = VirtualDate.new
+      vdate.duration = 1.hour
+      vdate.due << VirtualTime.new(hour: 10)
+      vdate.omit << VirtualTime.new(hour: 10)
+      vdate.shift = 1.hour
 
-      scheduler.tasks << task
+      scheduler.vdates << vdate
 
-      scheduled_tasks = scheduler.build(
+      scheduled_vdates = scheduler.build(
         Time.local(2023, 5, 10),
         Time.local(2023, 5, 11)
       )
 
-      scheduled_tasks.each do |i|
-        task.on?(i.start).should be_true
+      scheduled_vdates.each do |i|
+        vdate.on?(i.start).should be_true
       end
     end
   end
 
   describe "Scheduler explanations" do
-    it "attaches explanations to task scheduled_tasks" do
+    it "attaches explanations to vdate scheduled_vdates" do
       scheduler = VirtualDate::Scheduler.new
 
-      task = VirtualDate.new
-      task.duration = 1.hour
-      task.shift = 30.minutes
-      task.due << VirtualTime.new(hour: 10)
-      task.omit << VirtualTime.new(hour: 10)
+      vdate = VirtualDate.new
+      vdate.duration = 1.hour
+      vdate.shift = 30.minutes
+      vdate.due << VirtualTime.new(hour: 10)
+      vdate.omit << VirtualTime.new(hour: 10)
 
-      scheduler.tasks << task
+      scheduler.vdates << vdate
 
-      scheduled_tasks = scheduler.build(
+      scheduled_vdates = scheduler.build(
         Time.local(2023, 5, 10),
         Time.local(2023, 5, 11)
       )
 
-      inst = scheduled_tasks.first
+      inst = scheduled_vdates.first
       inst.explanation.should_not be_nil
       inst.explanation.lines.should_not be_empty
     end
@@ -1188,11 +1188,11 @@ describe "VirtualDate – advanced scheduling" do
     it "produces identical results on repeated runs" do
       scheduler = VirtualDate::Scheduler.new
 
-      task = VirtualDate.new
-      task.duration = 1.hour
-      task.due << VirtualTime.new(hour: 10)
+      vdate = VirtualDate.new
+      vdate.duration = 1.hour
+      vdate.due << VirtualTime.new(hour: 10)
 
-      scheduler.tasks << task
+      scheduler.vdates << vdate
 
       from = Time.local(2023, 5, 10)
       to = Time.local(2023, 5, 11)
@@ -1205,7 +1205,7 @@ describe "VirtualDate – advanced scheduling" do
   end
 
   describe "Scheduler priority handling" do
-    it "prefers higher-priority task when both conflict and are movable" do
+    it "prefers higher-priority vdate when both conflict and are movable" do
       scheduler = VirtualDate::Scheduler.new
 
       low = VirtualDate.new("low")
@@ -1222,22 +1222,22 @@ describe "VirtualDate – advanced scheduling" do
       high.parallel = 1
       high.due << VirtualTime.new(hour: 9)
 
-      scheduler.tasks = [low, high]
+      scheduler.vdates = [low, high]
 
-      scheduled_tasks = scheduler.build(
+      scheduled_vdates = scheduler.build(
         Time.local(2023, 5, 10),
         Time.local(2023, 5, 11)
       )
 
-      hi = scheduled_tasks.find(&.task.id.==("high")).not_nil!
-      lo = scheduled_tasks.find(&.task.id.==("low")).not_nil!
+      hi = scheduled_vdates.find(&.vdate.id.==("high")).not_nil!
+      lo = scheduled_vdates.find(&.vdate.id.==("low")).not_nil!
 
       hi.start.hour.should eq 9
       lo.start.should be >= hi.finish
     end
   end
 
-  it "does not allow priority to override fixed tasks" do
+  it "does not allow priority to override fixed vdates" do
     scheduler = VirtualDate::Scheduler.new
 
     fixed = VirtualDate.new("fixed")
@@ -1256,17 +1256,17 @@ describe "VirtualDate – advanced scheduling" do
     aggressive.shift = 30.minutes
     aggressive.due << VirtualTime.new(hour: 9)
 
-    scheduler.tasks = [fixed, aggressive]
+    scheduler.vdates = [fixed, aggressive]
 
-    scheduled_tasks = scheduler.build(
+    scheduled_vdates = scheduler.build(
       Time.local(2023, 5, 10),
       Time.local(2023, 5, 11)
     )
 
-    scheduled_tasks.size.should eq 2
+    scheduled_vdates.size.should eq 2
 
-    f = scheduled_tasks.find(&.task.id.==("fixed")).not_nil!
-    a = scheduled_tasks.find(&.task.id.==("aggressive")).not_nil!
+    f = scheduled_vdates.find(&.vdate.id.==("fixed")).not_nil!
+    a = scheduled_vdates.find(&.vdate.id.==("aggressive")).not_nil!
 
     f.start.hour.should eq 9
     a.start.should be >= f.finish
@@ -1276,38 +1276,38 @@ describe "VirtualDate – advanced scheduling" do
     it "rejects scheduling that would finish after deadline" do
       scheduler = VirtualDate::Scheduler.new
 
-      task = VirtualDate.new("deadline-task")
-      task.duration = 2.hours
-      task.deadline = Time.local(2023, 5, 10, 10, 0)
-      task.due << VirtualTime.new(hour: 9)
+      vdate = VirtualDate.new("deadline-vdate")
+      vdate.duration = 2.hours
+      vdate.deadline = Time.local(2023, 5, 10, 10, 0)
+      vdate.due << VirtualTime.new(hour: 9)
 
-      scheduler.tasks << task
+      scheduler.vdates << vdate
 
-      scheduled_tasks = scheduler.build(
+      scheduled_vdates = scheduler.build(
         Time.local(2023, 5, 10),
         Time.local(2023, 5, 11)
       )
 
-      scheduled_tasks.should be_empty
+      scheduled_vdates.should be_empty
     end
 
     it "allows scheduling that finishes exactly at deadline" do
       scheduler = VirtualDate::Scheduler.new
 
-      task = VirtualDate.new("exact")
-      task.duration = 1.hour
-      task.deadline = Time.local(2023, 5, 10, 10, 0)
-      task.due << VirtualTime.new(hour: 9)
+      vdate = VirtualDate.new("exact")
+      vdate.duration = 1.hour
+      vdate.deadline = Time.local(2023, 5, 10, 10, 0)
+      vdate.due << VirtualTime.new(hour: 9)
 
-      scheduler.tasks << task
+      scheduler.vdates << vdate
 
-      scheduled_tasks = scheduler.build(
+      scheduled_vdates = scheduler.build(
         Time.local(2023, 5, 10),
         Time.local(2023, 5, 11)
       )
 
-      scheduled_tasks.size.should eq 1
-      scheduled_tasks.first.finish.should eq task.deadline
+      scheduled_vdates.size.should eq 1
+      scheduled_vdates.first.finish.should eq vdate.deadline
     end
   end
 
@@ -1325,65 +1325,65 @@ describe "VirtualDate – advanced scheduling" do
     b.depends_on << a
     b.due << VirtualTime.new(hour: 9)
 
-    scheduler.tasks = [b, a]
+    scheduler.vdates = [b, a]
 
-    scheduled_tasks = scheduler.build(
+    scheduled_vdates = scheduler.build(
       Time.local(2023, 5, 10),
       Time.local(2023, 5, 10, 23, 59, 59)
     )
 
-    ia = scheduled_tasks.find(&.task.id.==("a")).not_nil!
-    ib = scheduled_tasks.find(&.task.id.==("b")).not_nil!
+    ia = scheduled_vdates.find(&.vdate.id.==("a")).not_nil!
+    ib = scheduled_vdates.find(&.vdate.id.==("b")).not_nil!
 
     ib.start.should be >= ia.finish
   end
 
   describe "Scheduler explanations" do
-    it "attaches explanations to task scheduled_tasks" do
+    it "attaches explanations to vdate scheduled_vdates" do
       scheduler = VirtualDate::Scheduler.new
 
-      task = VirtualDate.new("explain")
-      task.duration = 1.hour
-      task.shift = 30.minutes
-      task.due << VirtualTime.new(hour: 9)
+      vdate = VirtualDate.new("explain")
+      vdate.duration = 1.hour
+      vdate.shift = 30.minutes
+      vdate.due << VirtualTime.new(hour: 9)
 
       blocker = VirtualDate.new("blocker")
       blocker.duration = 2.hours
       blocker.fixed = true
       blocker.due << VirtualTime.new(hour: 9)
 
-      scheduler.tasks = [blocker, task]
+      scheduler.vdates = [blocker, vdate]
 
-      scheduled_tasks = scheduler.build(
+      scheduled_vdates = scheduler.build(
         Time.local(2023, 5, 10),
         Time.local(2023, 5, 11)
       )
 
-      inst = scheduled_tasks.find(&.task.id.==("explain")).not_nil!
+      inst = scheduled_vdates.find(&.vdate.id.==("explain")).not_nil!
       inst.explanation.lines.should_not be_empty
     end
   end
 
   describe "ICS export" do
-    it "exports scheduled tasks as valid iCal events" do
+    it "exports scheduled vdates as valid iCal events" do
       scheduler = VirtualDate::Scheduler.new
 
-      task = VirtualDate.new("ics-task")
-      task.duration = 1.hour
-      task.due << VirtualTime.new(hour: 10)
+      vdate = VirtualDate.new("ics-vdate")
+      vdate.duration = 1.hour
+      vdate.due << VirtualTime.new(hour: 10)
 
-      scheduler.tasks << task
+      scheduler.vdates << vdate
 
-      scheduled_tasks = scheduler.build(
+      scheduled_vdates = scheduler.build(
         Time.local(2023, 5, 10),
         Time.local(2023, 5, 11)
       )
 
-      ics = VirtualDate::ICS.export(scheduled_tasks)
+      ics = VirtualDate::ICS.export(scheduled_vdates)
 
       ics.should contain("BEGIN:VCALENDAR")
       ics.should contain("BEGIN:VEVENT")
-      ics.should contain("SUMMARY:ics-task")
+      ics.should contain("SUMMARY:ics-vdate")
       ics.should contain("END:VEVENT")
       ics.should contain("END:VCALENDAR")
     end

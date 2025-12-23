@@ -101,6 +101,7 @@ class VirtualDate
     # 1. Direct check
     direct = strict_on?(time, max_shift: max_shift, max_shifts: max_shifts, hint: time)
     return true if direct == true
+    return false if direct == false
 
     # 2. Only Time::Span shifts can produce inverse reachability
     shift = @shift
@@ -108,7 +109,7 @@ class VirtualDate
     return false if shift.total_nanoseconds == 0
 
     # TODO write a log about this
-    return false if max_shifts && max_shifts <= 0
+    return false if shifts_exhausted? max_shifts
     # 3. Inverse successor search:
     #    Look for a base time such that:
     #      strict_on?(base) => Time::Span delta
@@ -191,7 +192,7 @@ class VirtualDate
       # Time::Span shift
       return false if s.total_nanoseconds == 0
       # TODO Write a log about this
-      return false if max_shifts && max_shifts <= 0
+      return false if shifts_exhausted? max_shifts
       delta = unwrap_shift_result VirtualTime::Search.shift_from_base(time, s, max_shift: max_shift, max_shifts: max_shifts) { |t| omit_on?(t) == true }
       return delta || false
     end
@@ -261,10 +262,15 @@ class VirtualDate
     end
   end
 
-  # A simple, deterministic scheduler for VirtualDate tasks.
+  @[AlwaysInline]
+  private def shifts_exhausted?(max_shifts)
+    max_shifts && max_shifts <= 0
+  end
+
+  # A simple, deterministic scheduler for VirtualDate vdates.
   #
   # This scheduler:
-  # - Generates candidate candidates from `task.due` VirtualTimes
+  # - Generates candidate candidates from `vdate.due` VirtualTimes
   # - Resolves omit-driven shifts via `VirtualDate#resolve`
   # - Enforces conflict resolution using `duration`, `flags`, `parallel`
   # - Reschedules forward on conflicts when possible
@@ -274,89 +280,89 @@ class VirtualDate
   # - If you need global optimality (e.g. minimizing total displacement), you would add a second pass
   #   or switch to a constraint solver.
   class Scheduler
-    property tasks : Array(VirtualDate)
+    property vdates : Array(VirtualDate)
 
-    def initialize(@tasks = [] of VirtualDate)
-      index = @tasks.to_h { |t| {t.id, t} }
+    def initialize(@vdates = [] of VirtualDate)
+      index = @vdates.to_h { |t| {t.id, t} }
 
-      @tasks.each do |task|
-        task.resolve_dependencies!(index)
+      @vdates.each do |vdate|
+        vdate.resolve_dependencies!(index)
       end
     end
 
-    # Produces scheduled tasks in [from, to).
+    # Produces scheduled vdates in [from, to).
     #
     # Parameters:
     # - granularity: how frequently to generate candidates from due rules (defaults to 1 minute)
     # - max_candidates: safety limit to avoid infinite generation for very broad rules
     #
-    # Returns: Array(ScheduledTask), sorted by start time.
-    def build(from : Time, to : Time) : Array(ScheduledTask)
-      scheduled_tasks = [] of ScheduledTask
+    # Returns: Array(ScheduledVDate), sorted by start time.
+    def build(from : Time, to : Time) : Array(ScheduledVDate)
+      scheduled_vdates = [] of ScheduledVDate
 
-      ordered = order_tasks_by_dependencies(@tasks)
-      scheduled_index = {} of VirtualDate => ScheduledTask
+      ordered = order_vdates_by_dependencies(@vdates)
+      scheduled_index = {} of VirtualDate => ScheduledVDate
 
-      ordered.each do |task|
-        dependency_floor = task.depends_on.any? ? earliest_start_time_after_dependencies(task, scheduled_index) : nil
-        next if task.depends_on.any? && dependency_floor.nil?
+      ordered.each do |vdate|
+        dependency_floor = vdate.depends_on.any? ? earliest_start_time_after_dependencies(vdate, scheduled_index) : nil
+        next if vdate.depends_on.any? && dependency_floor.nil?
 
-        candidates = generate_candidates(task, from, to)
+        candidates = generate_candidates(vdate, from, to)
 
         candidates.each do |candidate|
           if dependency_floor
-            candidate = Candidate.new(task, dependency_floor) if dependency_floor > candidate.start
+            candidate = Candidate.new(vdate, dependency_floor) if dependency_floor > candidate.start
           end
 
-          scheduled_task = schedule_candidate(candidate, scheduled_tasks, horizon: to)
+          scheduled_vdate = schedule_candidate(candidate, scheduled_vdates, horizon: to)
 
-          # Dependency tasks must never be dropped
-          if scheduled_task
-            scheduled_tasks << scheduled_task
-            scheduled_index[scheduled_task.task] = scheduled_task
-          elsif task.depends_on.empty?
-            # Non-dependent tasks may fail silently
+          # Dependency vdates must never be dropped
+          if scheduled_vdate
+            scheduled_vdates << scheduled_vdate
+            scheduled_index[scheduled_vdate.vdate] = scheduled_vdate
+          elsif vdate.depends_on.empty?
+            # Non-dependent vdates may fail silently
             next
           else
             raise ArgumentError.new(
-              "Failed to schedule dependency task #{task.id}"
+              "Failed to schedule dependency vdate #{vdate.id}"
             )
           end
         end
       end
 
-      scheduled_tasks.sort_by!(&.start)
-      scheduled_tasks
+      scheduled_vdates.sort_by!(&.start)
+      scheduled_vdates
     end
 
-    # Sort by dependencies. Tasks with no dependencies have indegree == 0.
-    # E.g. ready = tasks.select { |t| indegree[t] == 0 }
-    private def order_tasks_by_dependencies(tasks : Array(VirtualDate)) : Array(VirtualDate)
+    # Sort by dependencies. VDates with no dependencies have indegree == 0.
+    # E.g. ready = vdates.select { |t| indegree[t] == 0 }
+    private def order_vdates_by_dependencies(vdates : Array(VirtualDate)) : Array(VirtualDate)
       # Build adjacency + indegree
       indegree = Hash(VirtualDate, Int32).new(0)
       outgoing = Hash(VirtualDate, Array(VirtualDate)).new { |h, k| h[k] = [] of VirtualDate }
 
-      tasks.each do |t|
+      vdates.each do |t|
         indegree[t] = 0
       end
 
-      tasks.each do |t|
+      vdates.each do |t|
         t.depends_on.each do |dep|
-          next unless tasks.includes?(dep)
+          next unless vdates.includes?(dep)
           outgoing[dep] << t
           indegree[t] = indegree[t] + 1
         end
       end
 
       # Ready set (indegree 0)
-      ready = tasks.select { |t| indegree[t] == 0 }
+      ready = vdates.select { |t| indegree[t] == 0 }
 
       # Deterministic ordering:
       # - fixed first (true first)
       # - higher priority first
       # - stable tie-breaker by id (string)
       sorter = ->(a : VirtualDate, b : VirtualDate) do
-        # 1. Fixed tasks first
+        # 1. Fixed vdates first
         fa = a.fixed ? 0 : 1
         fb = b.fixed ? 0 : 1
         cmp = fa <=> fb
@@ -385,20 +391,20 @@ class VirtualDate
         end
       end
 
-      if result.size != tasks.size
+      if result.size != vdates.size
         raise ArgumentError.new("Dependency cycle detected")
       end
 
       result
     end
 
-    # Finds earliest time a task can start, but not before its dependencies
+    # Finds earliest time a vdate can start, but not before its dependencies
     # are completed.
-    private def earliest_start_time_after_dependencies(task : VirtualDate, scheduled_index : Hash(VirtualDate, VirtualDate::ScheduledTask)) : Time?
+    private def earliest_start_time_after_dependencies(vdate : VirtualDate, scheduled_index : Hash(VirtualDate, VirtualDate::ScheduledVDate)) : Time?
       finishes = [] of Time
 
-      task.depends_on.each do |dep_task|
-        inst = scheduled_index[dep_task]?
+      vdate.depends_on.each do |dep_vdate|
+        inst = scheduled_index[dep_vdate]?
         return nil unless inst
         finishes << inst.finish
       end
@@ -407,15 +413,15 @@ class VirtualDate
     end
 
     # Returns start + duration
-    private def instance_finish(inst : ScheduledTask) : Time
-      inst.start + (inst.task.duration || 0.seconds)
+    private def vdate_finish(scheduled_vdate : ScheduledVDate) : Time
+      scheduled_vdate.start + (scheduled_vdate.vdate.duration || 0.seconds)
     end
 
     # Finds earliest valid start time according to VirtualDate#on?
     #
     # Does:
     # - Applies omit rules
-    # - Optionally expands into multiple candidates (staggered / parallel tasks)
+    # - Optionally expands into multiple candidates (staggered / parallel vdates)
     #
     # Does not do things that happen later in `schedule_candidate`, such as:
     # - Resolve conflicts
@@ -425,31 +431,31 @@ class VirtualDate
     # - Shift due to conflicts
     #
     # - Returns a small, bounded list of concrete Time values wrapped as objects
-    private def generate_candidates(task : VirtualDate, from : Time, to : Time) : Array(Candidate)
+    private def generate_candidates(vdate : VirtualDate, from : Time, to : Time) : Array(Candidate)
       candidates = [] of Candidate
 
-      start = earliest_start_time(task, from, to)
+      start = earliest_start_time(vdate, from, to)
       return candidates unless start
 
       # Non-staggered (backward-compatible) behavior
-      unless task.stagger && task.parallel > 1
+      unless vdate.stagger && vdate.parallel > 1
         # Apply omit check to the single produced candidate
-        candidate = Candidate.new(task, start)
+        candidate = Candidate.new(vdate, start)
         candidate.explanation.add("Matched due rule at #{start}")
         candidates << candidate
         return candidates
       end
 
-      stagger = task.stagger.not_nil!
+      stagger = vdate.stagger.not_nil!
       raise ArgumentError.new("stagger must be positive") if stagger <= 0.seconds
 
-      task.parallel.times do |i|
+      vdate.parallel.times do |i|
         t = start + stagger * i
         break if t > to
 
-        next if task.omit_on?(t)
+        next if vdate.omit_on?(t)
 
-        candidate = Candidate.new(task, t)
+        candidate = Candidate.new(vdate, t)
         candidate.explanation.add("Matched due rule at #{t} (staggered)")
         candidates << candidate
       end
@@ -457,9 +463,9 @@ class VirtualDate
       candidates
     end
 
-    # Finds earliest start time based on the task alone, not taking into account dependencies.
-    # In essence, task start = max( earliest_start_time, earliest_start_time_after_dependencies)
-    private def earliest_start_time(task : VirtualDate, from : Time, to : Time) : Time?
+    # Finds earliest start time based on the vdate alone, not taking into account dependencies.
+    # In essence, vdate start = max( earliest_start_time, earliest_start_time_after_dependencies)
+    private def earliest_start_time(vdate : VirtualDate, from : Time, to : Time) : Time?
       t = from
       iterations = 0
       max_iterations = 10_000
@@ -468,7 +474,7 @@ class VirtualDate
         iterations += 1
         raise ArgumentError.new("earliest_start_time exceeded iteration limit") if iterations > max_iterations
 
-        r = task.strict_on?(t)
+        r = vdate.strict_on?(t)
 
         case r
         when true
@@ -485,10 +491,10 @@ class VirtualDate
       nil
     end
 
-    # True if `task` is considered “on” at `time` in the produced schedule.
-    def on_in_schedule?(scheduled_tasks : Array(ScheduledTask), task : VirtualDate, time : Time) : Bool
-      scheduled_tasks.any? do |i|
-        next false unless i.task == task
+    # True if `vdate` is considered “on” at `time` in the produced schedule.
+    def on_in_schedule?(scheduled_vdates : Array(ScheduledVDate), vdate : VirtualDate, time : Time) : Bool
+      scheduled_vdates.any? do |i|
+        next false unless i.vdate == vdate
 
         if i.start == i.finish
           time == i.start
@@ -498,17 +504,17 @@ class VirtualDate
       end
     end
 
-    # Schedules an instance, resolving conflicts by shifting forward (using task.shift when Time::Span),
-    # respecting task.fixed and max_shift/max_shifts.
-    def schedule_candidate(candidate : Candidate, scheduled_tasks : Array(ScheduledTask), *, horizon : Time) : ScheduledTask?
-      task = candidate.task
+    # Schedules a vdate, resolving conflicts by shifting forward (using vdate.shift when Time::Span),
+    # respecting vdate.fixed and max_shift/max_shifts.
+    def schedule_candidate(candidate : Candidate, scheduled_vdates : Array(ScheduledVDate), *, horizon : Time) : ScheduledVDate?
+      vdate = candidate.vdate
       start = candidate.start
-      duration = task.duration || 0.seconds
+      duration = vdate.duration || 0.seconds
 
       if duration == 0.seconds
         return nil if start > horizon
-        scheduled = ScheduledTask.new(task, start)
-        scheduled.explanation.add "- Scheduled instant task at #{start}\n"
+        scheduled = ScheduledVDate.new(vdate, start)
+        scheduled.explanation.add "- Scheduled instant vdate at #{start}\n"
         return scheduled
       end
 
@@ -518,9 +524,9 @@ class VirtualDate
         # Horizon guard
         return nil if finish > horizon
 
-        candidate = ScheduledTask.new(task, start)
+        candidate = ScheduledVDate.new(vdate, start)
 
-        if deadline = task.deadline
+        if deadline = vdate.deadline
           deadline_time =
             case deadline
             when Time
@@ -536,46 +542,46 @@ class VirtualDate
         end
 
         # Check parallelism / conflicts
-        if acceptable_parallelism?(candidate, scheduled_tasks)
+        if acceptable_parallelism?(candidate, scheduled_vdates)
           candidate.explanation.add "- Scheduled at #{start} without conflicts\n"
           return candidate
         end
 
         # Conflict exists
-        conflict = scheduled_tasks.find do |i|
+        conflict = scheduled_vdates.find do |i|
           overlaps?(start, finish, i.start, i.finish)
         end
 
-        # Fixed task rules
+        # Fixed vdate rules
         if conflict
-          if conflict.task.fixed
-            # If task has dependents, it must be scheduled even if it conflicts
-            if has_dependents?(task)
-              candidate.explanation.add "Placed despite conflicts because other tasks depend on it"
+          if conflict.vdate.fixed
+            # If vdate has dependents, it must be scheduled even if it conflicts
+            if has_dependents?(vdate)
+              candidate.explanation.add "Placed despite conflicts because other vdates depend on it"
               return candidate
             end
 
             # Otherwise respect fixed semantics
-            return nil if task.fixed
+            return nil if vdate.fixed
 
-            candidate.explanation.add "- Yielded to fixed task #{conflict.task.id}, moved after #{conflict.finish}\n"
+            candidate.explanation.add "- Yielded to fixed vdate #{conflict.vdate.id}, moved after #{conflict.finish}\n"
             start = conflict.finish
             next
           end
 
-          if task.fixed
-            scheduled_tasks.delete(conflict)
-            candidate.explanation.add "- Displaced movable task #{conflict.task.id} (this task is fixed)\n"
+          if vdate.fixed
+            scheduled_vdates.delete(conflict)
+            candidate.explanation.add "- Displaced movable vdate #{conflict.vdate.id} (this vdate is fixed)\n"
             next
           end
 
           # Priority comparison
-          if task.priority > conflict.task.priority
-            scheduled_tasks.delete(conflict)
-            candidate.explanation.add "- Displaced lower-priority task #{conflict.task.id}\n"
+          if vdate.priority > conflict.vdate.priority
+            scheduled_vdates.delete(conflict)
+            candidate.explanation.add "- Displaced lower-priority vdate #{conflict.vdate.id}\n"
             next
-          elsif task.priority < conflict.task.priority
-            candidate.explanation.add "- Yielded to higher-priority task #{conflict.task.id}, moved after #{conflict.finish}\n"
+          elsif vdate.priority < conflict.vdate.priority
+            candidate.explanation.add "- Yielded to higher-priority vdate #{conflict.vdate.id}, moved after #{conflict.finish}\n"
             start = conflict.finish
             next
           end
@@ -583,7 +589,7 @@ class VirtualDate
 
         # Equal priority or no decisive conflict → shift forward
         shift_span =
-          case s = task.shift
+          case s = vdate.shift
           when Time::Span
             s
           else
@@ -596,9 +602,9 @@ class VirtualDate
       end
     end
 
-    # Returns whether any tasks depend on this one
-    private def has_dependents?(task : VirtualDate) : Bool
-      @tasks.any? { |t| t.depends_on.includes?(task) }
+    # Returns whether any vdates depend on this one
+    private def has_dependents?(vdate : VirtualDate) : Bool
+      @vdates.any? { |t| t.depends_on.includes?(vdate) }
     end
 
     @[AlwaysInline]
@@ -606,19 +612,18 @@ class VirtualDate
       a_start < b_end && b_start < a_end
     end
 
-    # Enforces per-task parallelism across overlapping scheduled_tasks sharing flags.
-    private def acceptable_parallelism?(candidate : ScheduledTask, scheduled_tasks : Array(ScheduledTask)) : Bool
+    # Enforces per-vdate parallelism across overlapping scheduled_vdates sharing flags.
+    private def acceptable_parallelism?(candidate : ScheduledVDate, scheduled_vdates : Array(ScheduledVDate)) : Bool
       c_start = candidate.start
-      c_end = candidate.start + (candidate.task.duration || 0.seconds)
+      duration = candidate.vdate.duration || 0.seconds
+      c_end = c_start + duration
 
       flags = candidate.flags
-      if flags.empty?
-        flags = [:__default]
-      end
+      flags = [:__default] if flags.empty?
 
       flags.each do |flag|
         limit =
-          case p = candidate.task.parallel
+          case p = candidate.vdate.parallel
           when Int32
             p
           when Hash(String, Int32)
@@ -627,54 +632,57 @@ class VirtualDate
             1
           end
 
-        concurrent =
-          scheduled_tasks.count do |i|
-            i_flags = i.flags
-            i_flags = [:__default] if i_flags.empty?
+        concurrent = 0
 
-            next false unless i_flags.includes?(flag)
+        scheduled_vdates.each do |i|
+          i_flags = i.flags
+          i_flags = [:__default] if i_flags.empty?
+          next unless i_flags.includes?(flag)
 
-            # Half-open overlap
-            overlaps? c_start, c_end, i.start, i.start + (i.task.duration || 0.seconds)
+          i_start = i.start
+          i_end = i_start + (i.vdate.duration || 0.seconds)
+
+          if overlaps?(c_start, c_end, i_start, i_end)
+            concurrent += 1
+            return false if concurrent + 1 > limit
           end
-
-        return false if concurrent + 1 > limit
+        end
       end
 
       true
     end
   end
 
-  # A candidate for scheduling, points to task, time, and an explanation buffer
+  # A candidate for scheduling, points to vdate, time, and an explanation buffer
   struct Candidate
-    getter task : VirtualDate
+    getter vdate : VirtualDate
     getter start : Time
     getter explanation : VirtualDate::Explanation
 
-    def initialize(@task : VirtualDate, @start : Time)
+    def initialize(@vdate : VirtualDate, @start : Time)
       @explanation = VirtualDate::Explanation.new
     end
   end
 
-  # A concrete scheduled candidate of a VirtualDate task.
-  class ScheduledTask
-    getter task : VirtualDate
+  # A concrete scheduled candidate of a VirtualDate vdate.
+  class ScheduledVDate
+    getter vdate : VirtualDate
     getter start : Time
     getter finish : Time
     property explanation : VirtualDate::Explanation
 
-    def initialize(@task : VirtualDate, @start : Time, explanation = nil)
-      @finish = @start + task.duration
+    def initialize(@vdate : VirtualDate, @start : Time, explanation = nil)
+      @finish = @start + vdate.duration
       @explanation = VirtualDate::Explanation.new
       @explanation.add explanation if explanation
     end
 
     def flags : Array(String)
-      task.flags.to_a
+      vdate.flags.to_a
     end
 
     def fixed : Bool
-      task.fixed
+      vdate.fixed
     end
   end
 
@@ -708,7 +716,7 @@ class VirtualDate
     include YAML::Serializable
 
     property schema_version : Int32
-    property tasks : Array(VirtualDate)
+    property vdates : Array(VirtualDate)
 
     def self.load(yaml : String) : Array(VirtualDate)
       YamlValidator.validate!(yaml)
@@ -728,13 +736,13 @@ class VirtualDate
           raise ArgumentError.new("Unsupported schema_version #{file.schema_version}")
         end
 
-        file.tasks
+        file.vdates
       when YAML::Nodes::Sequence
-        # Legacy format: bare task list
+        # Legacy format: bare vdate list
         Array(VirtualDate).from_yaml(yaml)
       else
         raise ArgumentError.new(
-          "Invalid YAML root (expected mapping with schema_version or task list)"
+          "Invalid YAML root (expected mapping with schema_version or vdate list)"
         )
       end
     end
@@ -757,7 +765,7 @@ class VirtualDate
     CURRENT_VERSION = 2
 
     def self.v1_to_current(raw : Array(VirtualDateRaw)) : Array(VirtualDate)
-      tasks = raw.map do |r|
+      vdates = raw.map do |r|
         v = VirtualDate.new
         v.id = r.id
         v.due = r.due
@@ -769,8 +777,8 @@ class VirtualDate
         v
       end
 
-      resolve_dependencies(tasks, raw)
-      tasks
+      resolve_dependencies(vdates, raw)
+      vdates
     end
 
     def self.v2_to_current(raw : Array(VirtualDateRaw)) : Array(VirtualDate)
@@ -778,8 +786,8 @@ class VirtualDate
       v1_to_current(raw)
     end
 
-    private def self.resolve_dependencies(tasks : Array(VirtualDate), raw : Array(VirtualDateRaw))
-      index = tasks.to_h { |t| {t.id, t} }
+    private def self.resolve_dependencies(vdates : Array(VirtualDate), raw : Array(VirtualDateRaw))
+      index = vdates.to_h { |t| {t.id, t} }
 
       raw.each_with_index do |r, i|
         next unless r.depends_on
@@ -787,7 +795,7 @@ class VirtualDate
         r.depends_on.not_nil!.each do |dep_id|
           dep = index[dep_id]?
           raise ArgumentError.new("Unknown dependency '#{dep_id}'") unless dep
-          tasks[i].depends_on << dep
+          vdates[i].depends_on << dep
         end
       end
     end
@@ -832,53 +840,45 @@ class VirtualDate
       raise ArgumentError.new("Invalid YAML:\n#{msg}")
     end
 
-    private def validate_root_mapping(node : YAML::Nodes::Mapping, errors : Array(YamlError))
-      map = mapping_to_hash(node, errors)
+    private def self.validate_root_mapping(
+      node : YAML::Nodes::Mapping,
+      errors : Array(YamlError),
+    )
+      keys = validate_mapping_keys(
+        node,
+        required: ["schema_version", "vdates"],
+        errors: errors
+      )
 
-      unless map["schema_version"]?
-        errors << YamlError.new("Missing 'schema_version'", node)
-      end
+      unless node.nodes.any? { |n| n.is_a?(YAML::Nodes::Sequence) }
+        pair =
+          node.nodes
+            .each_slice(2)
+            .find do |slice|
+              key = slice[0]
+              key.is_a?(YAML::Nodes::Scalar) && key.value == "vdates"
+            end
 
-      unless map["tasks"]?.is_a?(YAML::Nodes::Sequence)
-        errors << YamlError.new("'tasks' must be a sequence", node)
-        return
-      end
+        vdates_node = pair ? pair[1] : nil
 
-      validate_tasks(map["tasks"].as(YAML::Nodes::Sequence), errors)
-    end
-
-    private def validate_tasks(seq : YAML::Nodes::Sequence, errors : Array(YamlError))
-      seq.nodes.each do |task_node|
-        unless task_node.is_a?(YAML::Nodes::Mapping)
-          errors << YamlError.new("Each task must be a mapping", task_node)
-          next
+        unless vdates_node.is_a?(YAML::Nodes::Sequence)
+          errors << YamlError.new("'vdates' must be a sequence", node)
+          return
         end
 
-        task = build_tasks_hash(task_node, errors)
-
-        unless task["id"]?.is_a?(YAML::Nodes::Scalar)
-          errors << YamlError.new("Task missing 'id'", task_node)
-        end
-
-        if task["parallel"]?.try &.as(YAML::Nodes::Scalar)
-          p = task["parallel"].as(YAML::Nodes::Scalar).value.to_i?
-          if p && p < 1
-            errors << YamlError.new("'parallel' must be >= 1", task["parallel"])
-          end
-        end
-
-        if task["duration"]?.try &.as(YAML::Nodes::Scalar)
-          d = task["duration"].as(YAML::Nodes::Scalar).value.to_i?
-          if d && d < 0
-            errors << YamlError.new("'duration' must be >= 0", task["duration"])
-          end
-        end
+        validate_vdates(vdates_node.as(YAML::Nodes::Sequence), errors)
       end
     end
 
-    private def build_tasks_hash(node : YAML::Nodes::Mapping, errors : Array(YamlError)) : Hash(String, YAML::Nodes::Node)
-      h = {} of String => YAML::Nodes::Node
+    private def self.validate_mapping_keys(
+      node : YAML::Nodes::Mapping,
+      *,
+      required : Array(String) = [] of String,
+      allowed : Array(String)? = nil,
+      errors : Array(YamlError),
+    ) : Set(String)
       seen = {} of String => YAML::Nodes::Scalar
+      keys = Set(String).new
 
       nodes = node.nodes
       i = 0
@@ -897,15 +897,69 @@ class VirtualDate
             )
           else
             seen[key] = key_node
+            keys << key
           end
 
-          h[key] = val_node
+          if allowed && !allowed.includes?(key)
+            errors << YamlError.new("Unknown key '#{key}'", key_node)
+          end
         end
 
         i += 2
       end
 
-      h
+      required.each do |req|
+        unless keys.includes?(req)
+          errors << YamlError.new("Missing '#{req}'", node)
+        end
+      end
+
+      keys
+    end
+
+    private def self.validate_vdates(
+      seq : YAML::Nodes::Sequence,
+      errors : Array(YamlError),
+    )
+      seq.nodes.each do |vdate_node|
+        unless vdate_node.is_a?(YAML::Nodes::Mapping)
+          errors << YamlError.new("Each vdate must be a mapping", vdate_node)
+          next
+        end
+
+        keys = validate_mapping_keys(
+          vdate_node,
+          required: ["id"],
+          errors: errors
+        )
+
+        nodes = vdate_node.nodes
+        i = 0
+
+        while i < nodes.size
+          key = nodes[i].as(YAML::Nodes::Scalar).value
+          val = nodes[i + 1]
+
+          case key
+          when "parallel"
+            if val.is_a?(YAML::Nodes::Scalar)
+              p = val.value.to_i?
+              if p && p < 1
+                errors << YamlError.new("'parallel' must be >= 1", val)
+              end
+            end
+          when "duration"
+            if val.is_a?(YAML::Nodes::Scalar)
+              d = val.value.to_i?
+              if d && d < 0
+                errors << YamlError.new("'duration' must be >= 0", val)
+              end
+            end
+          end
+
+          i += 2
+        end
+      end
     end
 
     private def mapping_to_hash(node : YAML::Nodes::Mapping, errors : Array(YamlError))
@@ -1061,7 +1115,7 @@ class VirtualDate
     ICS_TIME_FORMAT = Time::Format.new("%Y%m%dT%H%M%SZ")
 
     def self.export(
-      scheduled_tasks : Array(ScheduledTask),
+      scheduled_vdates : Array(ScheduledVDate),
       *,
       calendar_name : String = "VirtualDate Schedule",
     ) : String
@@ -1075,7 +1129,7 @@ class VirtualDate
       lines << "METHOD:PUBLISH"
       lines << "X-WR-CALNAME:#{escape(calendar_name)}"
 
-      scheduled_tasks.each do |inst|
+      scheduled_vdates.each do |inst|
         lines.concat event(inst, now)
       end
 
@@ -1083,13 +1137,13 @@ class VirtualDate
       lines.join("\r\n") + "\r\n"
     end
 
-    private def self.event(inst : ScheduledTask, now : Time) : Array(String)
-      uid = "#{inst.task.id}-#{inst.start.to_unix}@virtualdate"
+    private def self.event(inst : ScheduledVDate, now : Time) : Array(String)
+      uid = "#{inst.vdate.id}-#{inst.start.to_unix}@virtualdate"
 
       description = String.build do |io|
         io << inst.explanation
-        unless inst.task.flags.empty?
-          io << "\nFlags: " << inst.task.flags.join(", ")
+        unless inst.vdate.flags.empty?
+          io << "\nFlags: " << inst.vdate.flags.join(", ")
         end
       end
 
@@ -1099,16 +1153,16 @@ class VirtualDate
         "DTSTAMP:#{format_time(now)}",
         "DTSTART:#{format_time(inst.start)}",
         "DTEND:#{format_time(inst.finish)}",
-        "SUMMARY:#{escape(inst.task.id)}",
+        "SUMMARY:#{escape(inst.vdate.id)}",
         "DESCRIPTION:#{escape(description)}",
         categories(inst),
         "END:VEVENT",
       ].compact
     end
 
-    private def self.categories(inst : ScheduledTask) : String?
-      return nil if inst.task.flags.empty?
-      "CATEGORIES:#{inst.task.flags.map { |f| escape(f) }.join(",")}"
+    private def self.categories(inst : ScheduledVDate) : String?
+      return nil if inst.vdate.flags.empty?
+      "CATEGORIES:#{inst.vdate.flags.map { |f| escape(f) }.join(",")}"
     end
 
     private def self.format_time(t : Time) : String
