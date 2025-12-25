@@ -1,7 +1,8 @@
 ---
 schema_version: 2
 vdates:
-- duration: 1800
+- shift:
+  duration: 1800
   parallel: 1
   priority: 0
   fixed: false
@@ -15,7 +16,8 @@ vdates:
   flags:
   - meeting
   depends_on: []
-- duration: 3600
+- shift:
+  duration: 3600
   parallel: 1
   priority: 0
   fixed: true
@@ -30,7 +32,8 @@ vdates:
   flags:
   - meeting
   depends_on: []
-- duration: 2700
+- shift:
+  duration: 2700
   parallel: 1
   priority: 0
   fixed: false

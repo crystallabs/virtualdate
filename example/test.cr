@@ -5,6 +5,7 @@ vdates = VirtualDate::VirtualDateFile.load(File.read("vdates.yml"))
 
 scheduler = VirtualDate::Scheduler.new(vdates)
 
+instances = nil
 1.upto(10) do |i|
   from, to = Time.local(2023, 5, i, 0, 0, 0), Time.local(2023, 5, i, 23, 59, 59)
 
@@ -27,14 +28,14 @@ scheduler = VirtualDate::Scheduler.new(vdates)
       puts "\t#{i.vdate.id} @ #{i.start}"
       puts "\t" + i.explanation.lines.join("\n\t")
     end
-
-  # This repeats, and only the last date is in the file
-  ics = VirtualDate::ICS.export(
-    instances,
-    calendar_name: "My Task Schedule"
-  )
-  File.write("vdates.ics", ics)
 end
+
+# For example, only the last displayed day is in ICS
+ics = VirtualDate::ICS.export(
+	instances.not_nil!,
+	calendar_name: "My Task Schedule"
+)
+File.write("vdates.ics", ics)
 
 file = {
   "schema_version" => VirtualDate::Migrator::CURRENT_VERSION,
