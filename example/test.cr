@@ -32,8 +32,8 @@ end
 
 # For example, only the last displayed day is in ICS
 ics = VirtualDate::ICS.export(
-	instances.not_nil!,
-	calendar_name: "My Task Schedule"
+  instances.not_nil!,
+  calendar_name: "My Task Schedule"
 )
 File.write("vdates.ics", ics)
 
