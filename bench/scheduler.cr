@@ -5,9 +5,9 @@ puts "Crystal #{Crystal::VERSION}"
 puts
 
 def measure(label : String, &block)
-  start = Time.monotonic
+  start = Time.instant
   yield
-  elapsed = Time.monotonic - start
+  elapsed = Time.instant - start
   puts "%-45s %8.2f ms" % [label, elapsed.total_milliseconds]
 end
 

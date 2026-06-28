@@ -1407,6 +1407,12 @@ describe "VirtualDate – advanced scheduling" do
       ics.should contain("SUMMARY:ics-vdate")
       ics.should contain("END:VEVENT")
       ics.should contain("END:VCALENDAR")
+
+      # The DESCRIPTION must hold the human-readable explanation lines,
+      # not the raw struct representation (regression for Explanation#to_s).
+      description = ics.lines.find!(&.starts_with?("DESCRIPTION:"))
+      description.should_not contain("Explanation(@lines")
+      description.should contain("Scheduled")
     end
   end
 
@@ -1581,6 +1587,74 @@ YAML
 
     expect_raises(ArgumentError) do
       scheduler = VirtualDate::Scheduler.new([a, b])
+    end
+  end
+
+  it "round-trips a VirtualDate through YAML" do
+    vd = VirtualDate.new("task1")
+    vd.due << VirtualTime.new(hour: 10)
+    vd.omit << VirtualTime.new(day: 15)
+    vd.shift = 1.hour
+    vd.duration = 30.minutes
+    vd.max_shift = 2.hours
+    vd.flags << "work"
+
+    vd2 = VirtualDate.from_yaml(vd.to_yaml)
+    vd2.id.should eq "task1"
+    vd2.shift.should eq 1.hour
+    vd2.duration.should eq 30.minutes
+    vd2.max_shift.should eq 2.hours
+    vd2.due.size.should eq 1
+    vd2.omit.size.should eq 1
+    vd2.flags.should eq Set{"work"}
+  end
+
+  it "loads a schema_version document via VirtualDateFile.load" do
+    yaml = <<-YAML
+schema_version: 2
+vdates:
+  - id: a
+    duration: 3600
+  - id: b
+YAML
+
+    vdates = VirtualDate::VirtualDateFile.load(yaml)
+    vdates.map(&.id).should eq ["a", "b"]
+    vdates[0].duration.should eq 1.hour
+  end
+
+  it "accepts current/older schema versions but rejects newer ones" do
+    older = "schema_version: 1\nvdates:\n  - id: a\n"
+    current = "schema_version: #{VirtualDate::Migrator::CURRENT_VERSION}\nvdates:\n  - id: a\n"
+    future = "schema_version: #{VirtualDate::Migrator::CURRENT_VERSION + 1}\nvdates:\n  - id: a\n"
+
+    VirtualDate::VirtualDateFile.load(older).map(&.id).should eq ["a"]
+    VirtualDate::VirtualDateFile.load(current).map(&.id).should eq ["a"]
+    expect_raises(ArgumentError, /Unsupported schema_version/) do
+      VirtualDate::VirtualDateFile.load(future)
+    end
+  end
+
+  describe VirtualDate::Explanation do
+    it "renders its lines (not the struct) in IO contexts" do
+      e = VirtualDate::Explanation.new
+      e.add("line one")
+      e.add("line two")
+
+      e.to_s.should eq "line one\nline two"
+      String.build { |io| io << e }.should eq "line one\nline two"
+    end
+  end
+
+  describe VirtualDate::YamlError do
+    it "formats with 1-based line and column in IO contexts" do
+      node = YAML::Nodes::Scalar.new("x")
+      node.start_line = 4
+      node.start_column = 2
+      err = VirtualDate::YamlError.new("bad", node)
+
+      err.to_s.should eq "Line 5, column 3: bad"
+      "#{err}".should eq "Line 5, column 3: bad"
     end
   end
 end

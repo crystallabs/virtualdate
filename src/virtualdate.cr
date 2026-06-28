@@ -310,11 +310,10 @@ class VirtualDate
         candidates = generate_candidates(vdate, from, to)
 
         candidates.each do |candidate|
-          if dependency_floor
-            if dependency_floor && dependency_floor > candidate.start
-              candidate = Candidate.new(vdate, dependency_floor)
-              candidate.explanation.add("Shifted from #{candidate.start} to #{dependency_floor} to satisfy dependency constraints")
-            end
+          if dependency_floor && dependency_floor > candidate.start
+            original_start = candidate.start
+            candidate = Candidate.new(vdate, dependency_floor)
+            candidate.explanation.add("Shifted from #{original_start} to #{dependency_floor} to satisfy dependency constraints")
           end
 
           scheduled_vdate = schedule_candidate(candidate, scheduled_vdates, horizon: to)
@@ -632,20 +631,12 @@ class VirtualDate
       duration = candidate.vdate.duration || 0.seconds
       c_end = c_start + duration
 
+      limit = candidate.vdate.parallel
+
       flags = candidate.flags
       flags = [:__default] if flags.empty?
 
       flags.each do |flag|
-        limit =
-          case p = candidate.vdate.parallel
-          when Int32
-            p
-          when Hash(String, Int32)
-            p[flag]? || 1
-          else
-            1
-          end
-
         concurrent = 0
 
         scheduled_vdates.each do |i|
@@ -754,8 +745,8 @@ class VirtualDate
       true
     end
 
-    def to_s
-      @lines.join("\n")
+    def to_s(io : IO) : Nil
+      @lines.join io, "\n"
     end
   end
 
@@ -777,11 +768,7 @@ class VirtualDate
       when YAML::Nodes::Mapping
         file = from_yaml(yaml)
 
-        if file.schema_version < Migrator::CURRENT_VERSION
-          # ok
-        elsif file.schema_version == Migrator::CURRENT_VERSION
-          # ok
-        else
+        if file.schema_version > Migrator::CURRENT_VERSION
           raise ArgumentError.new("Unsupported schema_version #{file.schema_version}")
         end
 
@@ -797,57 +784,10 @@ class VirtualDate
     end
   end
 
-  struct VirtualDateRaw
-    include YAML::Serializable
-
-    property id : String
-    property due : Array(VirtualTime) = [] of VirtualTime
-    property omit : Array(VirtualTime) = [] of VirtualTime
-    property duration : Int64? # seconds
-    property flags : Array(String)?
-    property parallel : Int32?
-    property fixed : Bool?
-    property depends_on : Array(String)?
-  end
-
   module Migrator
+    # Latest on-disk schema version produced and accepted by `VirtualDateFile`.
+    # Documents tagged with a higher version are rejected by `VirtualDateFile.load`.
     CURRENT_VERSION = 2
-
-    def self.v1_to_current(raw : Array(VirtualDateRaw)) : Array(VirtualDate)
-      vdates = raw.map do |r|
-        v = VirtualDate.new
-        v.id = r.id
-        v.due = r.due
-        v.omit = r.omit
-        v.duration = (r.duration || 0).seconds
-        v.flags = Set(String).new(r.flags || [] of String)
-        v.parallel = r.parallel || 1
-        v.fixed = r.fixed || false
-        v
-      end
-
-      resolve_dependencies(vdates, raw)
-      vdates
-    end
-
-    def self.v2_to_current(raw : Array(VirtualDateRaw)) : Array(VirtualDate)
-      # Currently identical to v1, but kept explicit for future changes
-      v1_to_current(raw)
-    end
-
-    private def self.resolve_dependencies(vdates : Array(VirtualDate), raw : Array(VirtualDateRaw))
-      index = vdates.to_h { |t| {t.id, t} }
-
-      raw.each_with_index do |r, i|
-        next unless r.depends_on
-
-        r.depends_on.not_nil!.each do |dep_id|
-          dep = index[dep_id]?
-          raise ArgumentError.new("Unknown dependency '#{dep_id}'") unless dep
-          vdates[i].depends_on << dep
-        end
-      end
-    end
   end
 
   struct YamlError
@@ -860,8 +800,8 @@ class VirtualDate
       @column = node.start_column + 1
     end
 
-    def to_s
-      "Line #{@line}, column #{@column}: #{@message}"
+    def to_s(io : IO) : Nil
+      io << "Line " << @line << ", column " << @column << ": " << @message
     end
   end
 

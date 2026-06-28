@@ -6,3 +6,6 @@
 # Libraries don't need dependency lock
 # Dependencies will be locked in application that uses them
 /shard.lock
+
+# Local-only dependency overrides (e.g. pointing virtualtime at a sibling checkout)
+/shard.override.yml
