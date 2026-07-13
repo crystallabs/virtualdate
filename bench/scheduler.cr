@@ -4,7 +4,7 @@ puts "VirtualDate::Scheduler benchmarks"
 puts "Crystal #{Crystal::VERSION}"
 puts
 
-def measure(label : String, &block)
+def measure(label : String, &)
   start = Time.instant
   yield
   elapsed = Time.instant - start

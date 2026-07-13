@@ -572,11 +572,11 @@ describe VirtualDate do
     date.day = 8..14
 
     dates = date.expand
-    r = dates.map { |d| item.strict_on? d }
+    r = dates.map { |expanded| item.strict_on? expanded }
     r.should eq [true, true, true, true, false, nil, nil]
 
     # And another form of saying it:
-    dates.map { |d| item.strict_on? d }.any? { |x| x }.should be_true
+    dates.map { |expanded| item.strict_on? expanded }.any? { |x| x }.should be_true
   end
 
   it "can shift til !due_on?( @omit) && due_on?( @due)" do
@@ -650,9 +650,6 @@ describe VirtualDate do
     i.due_on?(date).should eq true
   end
 end
-
-require "spec"
-require "../src/virtualdate"
 
 describe "VirtualDate – advanced scheduling" do
   describe "#resolve and #on?" do
@@ -743,8 +740,8 @@ describe "VirtualDate – advanced scheduling" do
 
       scheduled_vdates.size.should eq 2
 
-      first = scheduled_vdates.find(&.vdate.==(t1)).not_nil!
-      second = scheduled_vdates.find(&.vdate.==(t2)).not_nil!
+      first = scheduled_vdates.find!(&.vdate.==(t1))
+      second = scheduled_vdates.find!(&.vdate.==(t2))
 
       first.start.hour.should eq 9
       first.finish.should eq first.start + 2.hours
@@ -786,7 +783,7 @@ describe "VirtualDate – advanced scheduling" do
       scheduled_vdates.size.should eq 3
 
       starts = scheduled_vdates.map(&.start)
-      starts.count { |t| t.hour == 10 && t.minute == 0 }.should eq 2
+      starts.count { |time| time.hour == 10 && time.minute == 0 }.should eq 2
     end
   end
 
@@ -817,8 +814,8 @@ describe "VirtualDate – advanced scheduling" do
 
       scheduled_vdates.size.should eq 2
 
-      fixed_i = scheduled_vdates.find(&.vdate.==(fixed)).not_nil!
-      movable_i = scheduled_vdates.find(&.vdate.==(movable)).not_nil!
+      fixed_i = scheduled_vdates.find!(&.vdate.==(fixed))
+      movable_i = scheduled_vdates.find!(&.vdate.==(movable))
 
       fixed_i.start.hour.should eq 9
       movable_i.start.should be >= fixed_i.finish
@@ -847,8 +844,8 @@ describe "VirtualDate – advanced scheduling" do
 
       scheduled_vdates.size.should eq 2
 
-      ia = scheduled_vdates.find(&.vdate.==(a)).not_nil!
-      ib = scheduled_vdates.find(&.vdate.==(b)).not_nil!
+      ia = scheduled_vdates.find!(&.vdate.==(a))
+      ib = scheduled_vdates.find!(&.vdate.==(b))
 
       ib.start.should be >= ia.finish
     end
@@ -1029,8 +1026,8 @@ describe "VirtualDate – advanced scheduling" do
         Time.local(2023, 5, 11)
       )
 
-      hi = scheduled_vdates.find(&.vdate.==(high)).not_nil!
-      lo = scheduled_vdates.find(&.vdate.==(low)).not_nil!
+      hi = scheduled_vdates.find!(&.vdate.==(high))
+      lo = scheduled_vdates.find!(&.vdate.==(low))
 
       hi.start.hour.should eq 9
       lo.start.should be >= hi.finish
@@ -1062,8 +1059,8 @@ describe "VirtualDate – advanced scheduling" do
         Time.local(2023, 5, 11)
       )
 
-      fi = scheduled_vdates.find(&.vdate.==(fixed)).not_nil!
-      mi = scheduled_vdates.find(&.vdate.==(movable)).not_nil!
+      fi = scheduled_vdates.find!(&.vdate.==(fixed))
+      mi = scheduled_vdates.find!(&.vdate.==(movable))
 
       fi.start.hour.should eq 9
       mi.start.should be >= fi.finish
@@ -1102,9 +1099,9 @@ describe "VirtualDate – advanced scheduling" do
         Time.local(2023, 5, 11, 23, 59, 59)
       )
 
-      ia = scheduled_vdates.find(&.vdate.==(a)).not_nil!
-      ib = scheduled_vdates.find(&.vdate.==(b)).not_nil!
-      blocker_i = scheduled_vdates.find(&.vdate.==(blocker)).not_nil!
+      ia = scheduled_vdates.find!(&.vdate.==(a))
+      ib = scheduled_vdates.find!(&.vdate.==(b))
+      blocker_i = scheduled_vdates.find!(&.vdate.==(blocker))
       ib.start.should be >= ia.finish
       ib.start.should be >= blocker_i.finish
     end
@@ -1229,8 +1226,8 @@ describe "VirtualDate – advanced scheduling" do
         Time.local(2023, 5, 11)
       )
 
-      hi = scheduled_vdates.find(&.vdate.id.==("high")).not_nil!
-      lo = scheduled_vdates.find(&.vdate.id.==("low")).not_nil!
+      hi = scheduled_vdates.find!(&.vdate.id.==("high"))
+      lo = scheduled_vdates.find!(&.vdate.id.==("low"))
 
       hi.start.hour.should eq 9
       lo.start.should be >= hi.finish
@@ -1265,8 +1262,8 @@ describe "VirtualDate – advanced scheduling" do
 
     scheduled_vdates.size.should eq 2
 
-    f = scheduled_vdates.find(&.vdate.id.==("fixed")).not_nil!
-    a = scheduled_vdates.find(&.vdate.id.==("aggressive")).not_nil!
+    f = scheduled_vdates.find!(&.vdate.id.==("fixed"))
+    a = scheduled_vdates.find!(&.vdate.id.==("aggressive"))
 
     f.start.hour.should eq 9
     a.start.should be >= f.finish
@@ -1332,8 +1329,8 @@ describe "VirtualDate – advanced scheduling" do
       Time.local(2023, 5, 10, 23, 59, 59)
     )
 
-    ia = scheduled_vdates.find(&.vdate.id.==("a")).not_nil!
-    ib = scheduled_vdates.find(&.vdate.id.==("b")).not_nil!
+    ia = scheduled_vdates.find!(&.vdate.id.==("a"))
+    ib = scheduled_vdates.find!(&.vdate.id.==("b"))
 
     ib.start.should be >= ia.finish
   end
@@ -1359,7 +1356,7 @@ describe "VirtualDate – advanced scheduling" do
         Time.local(2023, 5, 11)
       )
 
-      inst = scheduled_vdates.find(&.vdate.id.==("explain")).not_nil!
+      inst = scheduled_vdates.find!(&.vdate.id.==("explain"))
       inst.explanation.lines.should_not be_empty
     end
   end
@@ -1586,7 +1583,7 @@ YAML
     b.depends_on << a
 
     expect_raises(ArgumentError) do
-      scheduler = VirtualDate::Scheduler.new([a, b])
+      VirtualDate::Scheduler.new([a, b])
     end
   end
 
@@ -1633,6 +1630,156 @@ YAML
     expect_raises(ArgumentError, /Unsupported schema_version/) do
       VirtualDate::VirtualDateFile.load(future)
     end
+  end
+
+  describe "Scheduler occurrence generation" do
+    it "schedules sparse rules over windows longer than a few days" do
+      scheduler = VirtualDate::Scheduler.new
+
+      vdate = VirtualDate.new
+      vdate.duration = 1.hour
+      vdate.due << VirtualTime.new(day: 15, hour: 10, minute: 0)
+
+      scheduler.vdates << vdate
+
+      scheduled = scheduler.build(Time.local(2023, 5, 1), Time.local(2023, 6, 1))
+
+      scheduled.size.should eq 1
+      scheduled[0].start.should eq Time.local(2023, 5, 15, 10, 0)
+    end
+
+    it "schedules every occurrence of a recurring rule in the window" do
+      scheduler = VirtualDate::Scheduler.new
+
+      vdate = VirtualDate.new
+      vdate.duration = 1.hour
+      vdate.due << VirtualTime.new(hour: 10, minute: 0)
+
+      scheduler.vdates << vdate
+
+      scheduled = scheduler.build(Time.local(2023, 5, 1), Time.local(2023, 5, 6))
+
+      scheduled.size.should eq 5
+      scheduled.map(&.start).should eq (1..5).map { |day| Time.local(2023, 5, day, 10, 0) }
+    end
+
+    it "coalesces contiguous matching times into a single occurrence" do
+      scheduler = VirtualDate::Scheduler.new
+
+      # Matches every minute of hour 10, but that is one contiguous block,
+      # so it must produce a single occurrence starting at 10:00.
+      vdate = VirtualDate.new
+      vdate.duration = 1.hour
+      vdate.due << VirtualTime.new(hour: 10)
+
+      scheduler.vdates << vdate
+
+      scheduled = scheduler.build(Time.local(2023, 5, 10), Time.local(2023, 5, 11))
+
+      scheduled.size.should eq 1
+      scheduled[0].start.should eq Time.local(2023, 5, 10, 10, 0)
+    end
+
+    it "respects begin/end bounds during occurrence generation" do
+      scheduler = VirtualDate::Scheduler.new
+
+      vdate = VirtualDate.new
+      vdate.duration = 1.hour
+      vdate.due << VirtualTime.new(hour: 10, minute: 0)
+      vdate.begin = Time.local(2023, 5, 3)
+
+      scheduler.vdates << vdate
+
+      scheduled = scheduler.build(Time.local(2023, 5, 1), Time.local(2023, 5, 6))
+
+      scheduled.map(&.start).should eq (3..5).map { |day| Time.local(2023, 5, day, 10, 0) }
+    end
+
+    it "caps generated candidates at max_candidates" do
+      scheduler = VirtualDate::Scheduler.new
+
+      # Hourly rule: 48 occurrences in a two-day window
+      vdate = VirtualDate.new
+      vdate.due << VirtualTime.new(minute: 0)
+
+      scheduler.vdates << vdate
+
+      scheduled = scheduler.build(Time.local(2023, 5, 1), Time.local(2023, 5, 3), max_candidates: 5)
+
+      scheduled.size.should eq 5
+    end
+
+    it "raises when the occurrence scan exceeds the iteration limit" do
+      scheduler = VirtualDate::Scheduler.new
+
+      # An always-matching rule is one giant contiguous run; scanning it at
+      # 1-minute granularity over ~75 days exceeds MAX_RULE_ITERATIONS.
+      vdate = VirtualDate.new
+      vdate.due << VirtualTime.new
+
+      scheduler.vdates << vdate
+
+      expect_raises(ArgumentError, /Occurrence scan exceeded/) do
+        scheduler.build(Time.local(2023, 5, 1), Time.local(2023, 7, 15))
+      end
+    end
+  end
+
+  describe "Scheduler conflict shifting edge cases" do
+    it "terminates when conflicting vdates have zero-span shift" do
+      scheduler = VirtualDate::Scheduler.new
+
+      a = VirtualDate.new("a")
+      b = VirtualDate.new("b")
+      [a, b].each do |vdate|
+        vdate.due << VirtualTime.new(hour: 10, minute: 0)
+        vdate.duration = 30.minutes
+        vdate.flags << "work"
+        vdate.parallel = 1
+        vdate.shift = 0.seconds
+      end
+
+      scheduler.vdates = [a, b]
+
+      scheduled = scheduler.build(Time.local(2023, 5, 10), Time.local(2023, 5, 11))
+
+      scheduled.size.should eq 2
+      scheduled[1].start.should be >= scheduled[0].finish
+    end
+
+    it "resolves conflicts by moving forward even when shift is negative" do
+      scheduler = VirtualDate::Scheduler.new
+
+      a = VirtualDate.new("a")
+      b = VirtualDate.new("b")
+      [a, b].each do |vdate|
+        vdate.due << VirtualTime.new(hour: 10, minute: 0)
+        vdate.duration = 30.minutes
+        vdate.flags << "work"
+        vdate.parallel = 1
+        vdate.shift = -1.hour
+      end
+
+      scheduler.vdates = [a, b]
+
+      scheduled = scheduler.build(Time.local(2023, 5, 10), Time.local(2023, 5, 11))
+
+      scheduled.size.should eq 2
+      scheduled[0].start.should eq Time.local(2023, 5, 10, 10, 0)
+      scheduled[1].start.should be >= scheduled[0].finish
+    end
+  end
+
+  it "loads a legacy bare-sequence document via VirtualDateFile.load" do
+    yaml = <<-YAML
+    - id: a
+      duration: 3600
+    - id: b
+    YAML
+
+    vdates = VirtualDate::VirtualDateFile.load(yaml)
+    vdates.map(&.id).should eq ["a", "b"]
+    vdates[0].duration.should eq 1.hour
   end
 
   describe VirtualDate::Explanation do
