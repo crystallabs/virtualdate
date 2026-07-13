@@ -1,17 +1,18 @@
 name: virtualdate
-version: 1.2.1
+version: 1.3.0
 
 authors:
   - Davor Ocelic <docelic@crystallabs.io>
 
-crystal: 0.35.1
+crystal: ">= 1.0.0"
 
 license: AGPL-3.0
 
 dependencies:
   virtualtime:
     github: crystallabs/virtualtime
-    version: ~> 1.0
+    # The scheduler relies on VirtualTime#to_time and Search fixes from 1.5.0
+    version: ~> 1.5
 
 development_dependencies:
   ameba:

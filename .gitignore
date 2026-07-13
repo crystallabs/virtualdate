@@ -9,3 +9,7 @@
 
 # Local-only dependency overrides (e.g. pointing virtualtime at a sibling checkout)
 /shard.override.yml
+
+# The example app installs its own dependencies locally
+/example/lib/
+/example/shard.lock

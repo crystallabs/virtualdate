@@ -1606,6 +1606,23 @@ YAML
     vd2.flags.should eq Set{"work"}
   end
 
+  it "serializes dependencies built in code and restores them on load" do
+    a = VirtualDate.new("a")
+    b = VirtualDate.new("b")
+    b.depends_on << a
+
+    yaml = [a, b].to_yaml
+    yaml.should contain "depends_on"
+
+    restored = Array(VirtualDate).from_yaml(yaml)
+    restored[1].depends_on_ids.should eq ["a"]
+
+    # Scheduler resolves ids back into the object graph
+    scheduler = VirtualDate::Scheduler.new(restored)
+    dep = scheduler.vdates.find! { |vdate| vdate.id == "b" }.depends_on
+    dep.map(&.id).should eq ["a"]
+  end
+
   it "loads a schema_version document via VirtualDateFile.load" do
     yaml = <<-YAML
 schema_version: 2
@@ -1767,6 +1784,71 @@ YAML
       scheduled.size.should eq 2
       scheduled[0].start.should eq Time.local(2023, 5, 10, 10, 0)
       scheduled[1].start.should be >= scheduled[0].finish
+    end
+  end
+
+  describe "Scheduler flag-aware conflict selection" do
+    it "does not displace an unrelated (different-flag) vdate when resolving a flag conflict" do
+      # "a" (home) and "w" (work) both occupy 10:00. "c" (work, high priority)
+      # depends on "z", which sorts after "w", so "c" is processed only after
+      # both "a" and "w" are already scheduled. It conflicts only with "w" and
+      # must displace it -- not the innocent "a".
+      a = VirtualDate.new("a")
+      a.due << VirtualTime.new(hour: 10, minute: 0)
+      a.duration = 30.minutes
+      a.flags << "home"
+
+      z = VirtualDate.new("z")
+      z.due << VirtualTime.new(hour: 9, minute: 0)
+
+      w = VirtualDate.new("w")
+      w.due << VirtualTime.new(hour: 10, minute: 0)
+      w.duration = 1.hour
+      w.flags << "work"
+
+      c = VirtualDate.new("c")
+      c.due << VirtualTime.new(hour: 10, minute: 0)
+      c.duration = 1.hour
+      c.flags << "work"
+      c.parallel = 1
+      c.priority = 10
+      c.depends_on << z
+
+      scheduler = VirtualDate::Scheduler.new([a, z, w, c])
+      scheduled = scheduler.build(Time.local(2023, 5, 10), Time.local(2023, 5, 11))
+
+      # "w" is displaced by the higher-priority "c"; "a" survives untouched
+      scheduled.map(&.vdate.id).sort!.should eq ["a", "c", "z"]
+      scheduled.find! { |item| item.vdate.id == "a" }.start.should eq Time.local(2023, 5, 10, 10, 0)
+      scheduled.find! { |item| item.vdate.id == "c" }.start.should eq Time.local(2023, 5, 10, 10, 0)
+    end
+
+    it "shifts past the actual flag conflict instead of yielding to an unrelated fixed vdate" do
+      # Fixed "f" (work, 10:00-13:00) does not compete with the "home" group,
+      # so "c" only conflicts with "b" (home, 10:00-10:30) and starts at 10:30,
+      # not at f's finish (13:00).
+      f = VirtualDate.new("f")
+      f.due << VirtualTime.new(hour: 10, minute: 0)
+      f.duration = 3.hours
+      f.flags << "work"
+      f.fixed = true
+
+      b = VirtualDate.new("b")
+      b.due << VirtualTime.new(hour: 10, minute: 0)
+      b.duration = 30.minutes
+      b.flags << "home"
+
+      c = VirtualDate.new("c")
+      c.due << VirtualTime.new(hour: 10, minute: 0)
+      c.duration = 30.minutes
+      c.flags << "home"
+      c.parallel = 1
+
+      scheduler = VirtualDate::Scheduler.new([f, b, c])
+      scheduled = scheduler.build(Time.local(2023, 5, 10), Time.local(2023, 5, 11))
+
+      scheduled.map(&.vdate.id).sort!.should eq ["b", "c", "f"]
+      scheduled.find! { |item| item.vdate.id == "c" }.start.should eq Time.local(2023, 5, 10, 10, 30)
     end
   end
 

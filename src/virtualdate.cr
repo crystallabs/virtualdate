@@ -591,9 +591,11 @@ class VirtualDate
           return candidate
         end
 
-        # Conflict exists
+        # Conflict exists. Only vdates competing for the same parallelism slots
+        # (sharing an effective flag group) count; an unrelated overlapping vdate
+        # can run in parallel and must not be displaced or yielded to.
         conflict = scheduled_vdates.find do |i|
-          overlaps?(start, finish, i.start, i.finish)
+          overlaps?(start, finish, i.start, i.finish) && shares_flag_group?(vdate, i.vdate)
         end
 
         # Fixed vdate rules
@@ -673,6 +675,16 @@ class VirtualDate
     @[AlwaysInline]
     private def overlaps?(a_start, a_end, b_start, b_end)
       a_start < b_end && b_start < a_end
+    end
+
+    # True if the two vdates compete for the same parallelism slots.
+    # Vdates without flags all share one implicit default group.
+    private def shares_flag_group?(a : VirtualDate, b : VirtualDate) : Bool
+      if a.flags.empty?
+        b.flags.empty?
+      else
+        a.flags.any? { |flag| b.flags.includes?(flag) }
+      end
     end
 
     # Enforces per-vdate parallelism across overlapping scheduled_vdates sharing flags.
@@ -1041,6 +1053,14 @@ class VirtualDate
     @depends_on = @depends_on_ids.compact_map do |id|
       index[id]? || raise ArgumentError.new("Unknown dependency '#{id}'")
     end
+  end
+
+  # Dependencies built in code (via `depends_on`) would otherwise be lost on
+  # save, because only `depends_on_ids` is serialized. IDs loaded from YAML are
+  # kept as-is until `resolve_dependencies!` populates the object graph.
+  def to_yaml(yaml : YAML::Nodes::Builder)
+    @depends_on_ids = @depends_on.map(&.id) unless @depends_on.empty?
+    super
   end
 
   private def unwrap_shift_result(r : VirtualTime::Result::Result) : Time::Span?

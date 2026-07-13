@@ -74,14 +74,28 @@ p vd.on?( Time["2017-03-18"]) # ==> true
 # And it is due on any Mar 18, doesn't need to be in 2017:
 p vd.on?( Time["2023-03-18"]) # ==> true
 
-# But it is not due on Mar 20, 2017, because that date is omitted, and the system will give us
-# a span of time (offset) when it can be scheduled. Based on our reschedule settings above, this
-# will be a span for 2 days later.
-p vd.on?( Time["2017-03-20"]) # ==> #<Time::Span @span=2.00:00:00>
+# But it is not on on Mar 20, 2017, because that date is omitted. Based on our reschedule
+# settings above, it gets shifted to 2 days later:
+p vd.on?( Time["2017-03-20"]) # ==> false
 
-# Asking whether the VD is due on the rescheduled date (Mar 22) will tell us no, because currently
-# rescheduled dates are not counted as due/on dates:
-p vd.on?( Time["2017-03-22"]) # ==> nil
+# And asking about the rescheduled date (Mar 22) tells us yes -- `on?` detects that the
+# omitted Mar 20 occurrence resolves (shifts) to exactly this date:
+p vd.on?( Time["2017-03-22"]) # ==> true
+```
+
+`on?` always returns a `Bool`. When you need the details behind that answer, use:
+
+```crystal
+# `strict_on?` reports the raw status at the asked time:
+# nil (not due), true (due), false (due but omitted/unschedulable),
+# or a Time::Span (due but omitted; add the span to reach the rescheduled time):
+p vd.strict_on?( Time["2017-03-16"]) # ==> true
+p vd.strict_on?( Time["2017-03-20"]) # ==> #<Time::Span @span=2.00:00:00>
+p vd.strict_on?( Time["2017-03-22"]) # ==> nil
+
+# `resolve` returns the effective scheduled time directly:
+# a Time (rescheduled), true (scheduled as asked), false (unschedulable), or nil (not due):
+p vd.resolve( Time["2017-03-20"]) # ==> 2017-03-22 00:00:00
 ```
 
 Here's another example of a VirtualDate that is due on every other day in March, but if it falls
@@ -108,7 +122,7 @@ vd.shift = nil # or 'false' to explicitly say it's omitted; false is the default
 # Now let's check when it is due and when not in March:
 # (Do this by printing a list for days 1 - 31):
 (1..31).each do |d|
-  p "Mar-#{d} = #{vd.on?( Time.local(2023, 3, d)}"
+  p "Mar-#{d} = #{vd.on?(Time.local(2023, 3, d))}"
 end
 ```
 
@@ -157,12 +171,12 @@ one match is enough for the field to match.
 
 ### Start and End Dates
 
-In addition to absolute `Time` values, `start` and `end` can be `VirtualTime`s. When they are set to those types,
+In addition to absolute `Time` values, `begin` and `end` can be `VirtualTime`s. When they are set to those types,
 they don't act like usual to confine VD's scheduling to the from-to period, but the actual times asked must
 `match?` both of them (if they are specified) in the usual, VT's sense.
 
-In other words, to have a VD active during say, summer months, you could define `start = VirtualTime.new month: 4..10`,
-and would not need any `stop` value.
+In other words, to have a VD active during say, summer months, you could define `begin = VirtualTime.new month: 4..10`,
+and would not need any `end` value.
 
 This functionality is quite redundant with the usual `due` and `omit` dates, is highly experimental,
 and probably not something to be used.
