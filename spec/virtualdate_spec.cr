@@ -1,6 +1,12 @@
 require "spec"
 require "../src/virtualdate"
 
+# Reverses RFC 5545 line folding: a CRLF followed by a single space is a
+# continuation of the preceding content line.
+def unfold_ics(ics : String) : Array(String)
+  ics.gsub("\r\n ", "").split("\r\n", remove_empty: true)
+end
+
 describe VirtualDate do
   it "honors begin/end dates" do
     vd = VirtualDate.new
@@ -608,13 +614,13 @@ describe VirtualDate do
     vd.omit = [omit]
 
     date = Time.unix 10
-    vd.strict_on?(date, max_shifts: 30).should eq false
+    vd.strict_on?(date, max_shifts: 30).should be_false
 
     vd.shift = 1.second
     vd.strict_on?(date, max_shifts: 30).should eq 3.seconds
 
     vd.shift = 500.milliseconds
-    vd.strict_on?(date, max_shifts: 3).should eq false
+    vd.strict_on?(date, max_shifts: 3).should be_false
   end
 
   it "can match against Time objects" do
@@ -647,7 +653,7 @@ describe VirtualDate do
     due.day = -1
     i.due << due
     date = Time.local year: 2017, month: 2, day: 28
-    i.due_on?(date).should eq true
+    i.due_on?(date).should be_true
   end
 end
 
@@ -1383,6 +1389,61 @@ describe "VirtualDate – advanced scheduling" do
   end
 
   describe "ICS export" do
+    it "folds content lines to 75 octets" do
+      scheduler = VirtualDate::Scheduler.new
+
+      vdate = VirtualDate.new("folding-vdate")
+      vdate.duration = 1.hour
+      vdate.shift = 30.minutes
+      vdate.due << VirtualTime.new(hour: 10)
+      vdate.omit << VirtualTime.new(hour: 10)
+
+      scheduler.vdates << vdate
+
+      scheduled = scheduler.build(
+        Time.local(2023, 5, 10),
+        Time.local(2023, 5, 11)
+      )
+
+      ics = VirtualDate::ICS.export(scheduled)
+
+      # Regression: DESCRIPTION carries several explanation lines and used to be
+      # emitted as one long line, which RFC 5545 does not permit.
+      ics.split("\r\n", remove_empty: true).each do |line|
+        line.bytesize.should be <= 75
+      end
+
+      # Folding is reversible, and loses nothing
+      description = unfold_ics(ics).find!(&.starts_with?("DESCRIPTION:"))
+      description.should contain "Initial candidate at"
+      description.should contain "Scheduled at"
+    end
+
+    it "folds without splitting multi-byte characters" do
+      scheduler = VirtualDate::Scheduler.new
+
+      vdate = VirtualDate.new("ünïcödé-" + "ä" * 80)
+      vdate.duration = 1.hour
+      vdate.due << VirtualTime.new(hour: 10)
+
+      scheduler.vdates << vdate
+
+      scheduled = scheduler.build(
+        Time.local(2023, 5, 10),
+        Time.local(2023, 5, 11)
+      )
+
+      ics = VirtualDate::ICS.export(scheduled)
+
+      ics.split("\r\n", remove_empty: true).each do |line|
+        line.bytesize.should be <= 75
+        # A split inside a multi-byte character would leave invalid UTF-8
+        line.valid_encoding?.should be_true
+      end
+
+      unfold_ics(ics).find!(&.starts_with?("SUMMARY:")).should eq "SUMMARY:#{vdate.id}"
+    end
+
     it "exports scheduled vdates as valid iCal events" do
       scheduler = VirtualDate::Scheduler.new
 
@@ -1504,10 +1565,10 @@ describe "VirtualDate – advanced scheduling" do
 
   it "rejects duplicate keys at root mapping level" do
     yaml = <<-YAML
-schema_version: 2
-schema_version: 2
-vdates: []
-YAML
+      schema_version: 2
+      schema_version: 2
+      vdates: []
+      YAML
 
     expect_raises(ArgumentError) do
       VirtualDate::VirtualDateFile.load(yaml)
@@ -1541,6 +1602,93 @@ YAML
     vd.on?(date).should be_true
   end
 
+  it "enforces deadlines on zero-duration vdates" do
+    scheduler = VirtualDate::Scheduler.new
+
+    vdate = VirtualDate.new("instant")
+    vdate.duration = 0.seconds
+    vdate.deadline = Time.local(2023, 5, 10, 9, 0)
+    vdate.due << VirtualTime.new(hour: 10)
+
+    scheduler.vdates << vdate
+
+    # Regression: zero-duration vdates took a shortcut that skipped the
+    # deadline check entirely
+    scheduler.build(Time.local(2023, 5, 10), Time.local(2023, 5, 11)).should be_empty
+  end
+
+  it "keeps the explanation of a zero-duration vdate" do
+    scheduler = VirtualDate::Scheduler.new
+
+    vdate = VirtualDate.new("instant")
+    vdate.duration = 0.seconds
+    vdate.due << VirtualTime.new(hour: 10)
+
+    scheduler.vdates << vdate
+
+    scheduled = scheduler.build(Time.local(2023, 5, 10), Time.local(2023, 5, 11))
+
+    scheduled.size.should eq 1
+    # Regression: the candidate's explanation used to be discarded
+    scheduled[0].explanation.lines.first.should contain "Initial candidate at"
+  end
+
+  it "excludes a shift-resolved start at the exclusive end of the window" do
+    scheduler = VirtualDate::Scheduler.new
+
+    vdate = VirtualDate.new("edge")
+    vdate.duration = 0.seconds
+    vdate.due << VirtualTime.new(hour: 10, minute: 0)
+    vdate.omit << VirtualTime.new(hour: 10, minute: 0)
+    vdate.shift = 1.hour
+
+    scheduler.vdates << vdate
+
+    # The 10:00 occurrence is omitted and shifts to 11:00, which is outside the
+    # half-open window [from, 11:00)
+    scheduler.build(Time.local(2023, 5, 10), Time.local(2023, 5, 10, 11, 0)).should be_empty
+
+    scheduler.build(Time.local(2023, 5, 10), Time.local(2023, 5, 10, 11, 1))
+      .map(&.start).should eq [Time.local(2023, 5, 10, 11, 0)]
+  end
+
+  it "raises when a vdate that others depend on cannot be scheduled" do
+    a = VirtualDate.new("a")
+    a.duration = 2.hours
+    a.deadline = Time.local(2023, 5, 10, 10, 0)
+    a.due << VirtualTime.new(hour: 9)
+
+    b = VirtualDate.new("b")
+    b.duration = 1.hour
+    b.depends_on << a
+    b.due << VirtualTime.new(hour: 9)
+
+    scheduler = VirtualDate::Scheduler.new([a, b])
+
+    expect_raises(ArgumentError, /which other vdates depend on/) do
+      scheduler.build(Time.local(2023, 5, 10), Time.local(2023, 5, 11))
+    end
+  end
+
+  it "drops an unschedulable vdate that only has dependencies of its own" do
+    a = VirtualDate.new("a")
+    a.duration = 1.hour
+    a.due << VirtualTime.new(hour: 9)
+
+    b = VirtualDate.new("b")
+    b.duration = 2.hours
+    b.deadline = Time.local(2023, 5, 10, 10, 0)
+    b.depends_on << a
+    b.due << VirtualTime.new(hour: 9)
+
+    scheduler = VirtualDate::Scheduler.new([a, b])
+    scheduled = scheduler.build(Time.local(2023, 5, 10), Time.local(2023, 5, 11))
+
+    # Regression: having dependencies used to be mistaken for being a
+    # dependency, so an unschedulable "b" raised instead of being dropped
+    scheduled.map(&.vdate.id).should eq ["a"]
+  end
+
   it "schedules zero-duration vdates without blocking others" do
     scheduler = VirtualDate::Scheduler.new
 
@@ -1564,11 +1712,11 @@ YAML
 
   it "rejects duplicate keys inside vdate mapping" do
     yaml = <<-YAML
-schema_version: 2
-vdates:
-  - id: a
-    id: b
-YAML
+      schema_version: 2
+      vdates:
+        - id: a
+          id: b
+      YAML
 
     expect_raises(ArgumentError) do
       VirtualDate::VirtualDateFile.load(yaml)
@@ -1606,6 +1754,49 @@ YAML
     vd2.flags.should eq Set{"work"}
   end
 
+  it "round-trips absolute begin/end/deadline times through YAML" do
+    vd = VirtualDate.new("bounded")
+    vd.begin = Time.local(2023, 5, 10, 9, 0, 0)
+    vd.end = Time.local(2023, 5, 20, 17, 30, 0)
+    vd.deadline = Time.local(2023, 5, 20, 18, 0, 0)
+
+    # Regression: `Time#to_s` was emitted, which is not RFC 3339 and so could
+    # not be read back -- the value was then misread as a VirtualTime rule.
+    vd2 = VirtualDate.from_yaml vd.to_yaml
+    vd2.begin.should eq vd.begin
+    vd2.end.should eq vd.end
+    vd2.deadline.should eq vd.deadline
+  end
+
+  it "round-trips sub-second spans through YAML" do
+    vd = VirtualDate.new("subsecond")
+    vd.shift = -500.milliseconds
+    vd.duration = 1500.milliseconds
+    vd.max_shift = 2500.milliseconds
+
+    # Regression: spans were truncated to whole seconds, so a sub-second shift
+    # came back as `0` -- i.e. as "no shift at all".
+    vd2 = VirtualDate.from_yaml vd.to_yaml
+    vd2.shift.should eq -500.milliseconds
+    vd2.duration.should eq 1500.milliseconds
+    vd2.max_shift.should eq 2500.milliseconds
+  end
+
+  it "keeps whole spans as plain integer seconds in YAML" do
+    vd = VirtualDate.new("whole")
+    vd.duration = 1.hour
+    vd.shift = -90.seconds
+    vd.max_shift = 2.hours
+
+    yaml = vd.to_yaml
+    yaml.should contain "duration: 3600"
+    yaml.should contain "shift: -90"
+    yaml.should contain "max_shift: 7200"
+
+    # Documents that documents written by older versions still load
+    VirtualDate.from_yaml(yaml).duration.should eq 1.hour
+  end
+
   it "serializes dependencies built in code and restores them on load" do
     a = VirtualDate.new("a")
     b = VirtualDate.new("b")
@@ -1625,12 +1816,12 @@ YAML
 
   it "loads a schema_version document via VirtualDateFile.load" do
     yaml = <<-YAML
-schema_version: 2
-vdates:
-  - id: a
-    duration: 3600
-  - id: b
-YAML
+      schema_version: 2
+      vdates:
+        - id: a
+          duration: 3600
+        - id: b
+      YAML
 
     vdates = VirtualDate::VirtualDateFile.load(yaml)
     vdates.map(&.id).should eq ["a", "b"]
@@ -1823,6 +2014,44 @@ YAML
       scheduled.find! { |item| item.vdate.id == "c" }.start.should eq Time.local(2023, 5, 10, 10, 0)
     end
 
+    it "does not let priority displace a vdate that others depend on" do
+      # "a" is scheduled first and "b" is placed right after it. "c" (higher
+      # priority, same flag group) is processed last because it depends on "z".
+      # Displacing "a" at that point would leave "b" anchored to a finish time
+      # that is no longer in the schedule, so "c" must yield instead.
+      a = VirtualDate.new("a")
+      a.due << VirtualTime.new(hour: 10, minute: 0)
+      a.duration = 1.hour
+      a.flags << "work"
+
+      b = VirtualDate.new("b")
+      b.due << VirtualTime.new(hour: 10, minute: 0)
+      b.duration = 30.minutes
+      b.flags << "home"
+      b.depends_on << a
+
+      z = VirtualDate.new("z")
+      z.due << VirtualTime.new(hour: 9, minute: 0)
+
+      c = VirtualDate.new("c")
+      c.due << VirtualTime.new(hour: 10, minute: 0)
+      c.duration = 1.hour
+      c.flags << "work"
+      c.parallel = 1
+      c.priority = 100
+      c.depends_on << z
+
+      scheduler = VirtualDate::Scheduler.new([a, b, z, c])
+      scheduled = scheduler.build(Time.local(2023, 5, 10), Time.local(2023, 5, 11))
+
+      scheduled.map(&.vdate.id).sort!.should eq ["a", "b", "c", "z"]
+
+      by_id = scheduled.to_h { |item| {item.vdate.id, item} }
+      by_id["a"].start.should eq Time.local(2023, 5, 10, 10, 0)
+      by_id["b"].start.should eq by_id["a"].finish
+      by_id["c"].start.should eq Time.local(2023, 5, 10, 11, 0)
+    end
+
     it "shifts past the actual flag conflict instead of yielding to an unrelated fixed vdate" do
       # Fixed "f" (work, 10:00-13:00) does not compete with the "home" group,
       # so "c" only conflicts with "b" (home, 10:00-10:30) and starts at 10:30,
@@ -1854,10 +2083,10 @@ YAML
 
   it "loads a legacy bare-sequence document via VirtualDateFile.load" do
     yaml = <<-YAML
-    - id: a
-      duration: 3600
-    - id: b
-    YAML
+      - id: a
+        duration: 3600
+      - id: b
+      YAML
 
     vdates = VirtualDate::VirtualDateFile.load(yaml)
     vdates.map(&.id).should eq ["a", "b"]

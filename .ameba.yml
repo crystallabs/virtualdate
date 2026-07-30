@@ -1,0 +1,22 @@
+# Ameba configuration.
+#
+# TODO comments in the source are intentional development notes,
+# so the admonition rule is disabled.
+Documentation/DocumentationAdmonition:
+  Enabled: false
+
+# `Nil | Bool | Time::Span` spells out the three distinct scheduling policies a
+# `shift` (or `on`) can express. A trailing `?` on a parenthesized union hides
+# that the nil case is one of the three, rather than a mere absence of value.
+Style/VerboseNilType:
+  Enabled: false
+
+# `nil` is a first-class result throughout this shard, not an absent value:
+# `#strict_on?` returns nil for "not applicable" as distinct from false for
+# "due but unschedulable", and `#resolve` keeps that distinction. Spelling the
+# nil branches out is what makes those three-way returns readable.
+Style/RedundantNilInControlExpression:
+  Enabled: false
+
+Lint/ElseNil:
+  Enabled: false

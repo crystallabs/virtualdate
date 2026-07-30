@@ -17,15 +17,14 @@ instances = [] of VirtualDate::Scheduled
   instances
     .sort_by(&.start)
     .each do |instance|
-      puts "%-10s  %s – %s  (%s)" % {
-        instance.start.to_s,
-        instance.finish.to_s,
-        "\t",
+      # The date is already in the header above, so only the time is shown here
+      puts "%s – %s  %-16s (%s)" % {
+        instance.start.to_s("%R"),
+        instance.finish.to_s("%R"),
         instance.vdate.id,
         instance.vdate.flags.join(", "),
       }
 
-      puts "\t#{instance.vdate.id} @ #{instance.start}"
       puts "\t" + instance.explanation.lines.join("\n\t")
     end
 end

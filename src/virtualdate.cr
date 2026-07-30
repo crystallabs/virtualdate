@@ -3,8 +3,8 @@ require "virtualtime"
 # VirtualDate builds on VirtualTime to represent due/omit rules plus higher-level scheduling semantics.
 class VirtualDate
   VERSION_MAJOR    = 1
-  VERSION_MINOR    = 2
-  VERSION_REVISION = 1
+  VERSION_MINOR    = 3
+  VERSION_REVISION = 0
   VERSION          = [VERSION_MAJOR, VERSION_MINOR, VERSION_REVISION].join '.'
 
   include YAML::Serializable
@@ -81,7 +81,7 @@ class VirtualDate
   @[YAML::Field(converter: VirtualDate::VirtualTimeOrTimeConverter)]
   property deadline : VirtualTime::TimeOrVirtualTime? = nil
 
-  def initialize(@id : String? = "")
+  def initialize(@id : String = "")
   end
 
   # Checks if the vdate is effectively scheduled at `time`.
@@ -286,7 +286,7 @@ class VirtualDate
         vdate.resolve_dependencies!(index)
       end
 
-      order_vdates_by_dependencies(@vdates)
+      validate_no_dependency_cycles!
     end
 
     # Maximum number of step-iterator advances per due rule while scanning for
@@ -316,6 +316,10 @@ class VirtualDate
       ordered = order_vdates_by_dependencies(@vdates)
       scheduled_index = {} of VirtualDate => Scheduled
 
+      # Computed once, because it is consulted for every candidate and for
+      # every conflict encountered while placing one.
+      depended_upon = vdates_with_dependents
+
       ordered.each do |vdate|
         dependency_floor = vdate.depends_on.empty? ? nil : earliest_start_time_after_dependencies(vdate, scheduled_index)
         next if !vdate.depends_on.empty? && dependency_floor.nil?
@@ -329,20 +333,19 @@ class VirtualDate
             candidate.explanation.add("Shifted from #{original_start} to #{dependency_floor} to satisfy dependency constraints")
           end
 
-          scheduled_vdate = schedule_candidate(candidate, scheduled_vdates, horizon: to)
+          scheduled_vdate = schedule_candidate(candidate, scheduled_vdates, horizon: to, depended_upon: depended_upon)
 
-          # Dependency vdates must never be dropped
           if scheduled_vdate
             scheduled_vdates << scheduled_vdate
             scheduled_index[scheduled_vdate.vdate] = scheduled_vdate
-          elsif vdate.depends_on.empty?
-            # Non-dependent vdates may fail silently
-            next
-          else
+          elsif depended_upon.includes? vdate
+            # A vdate that others depend on must never be silently dropped,
+            # or those dependents would be scheduled against nothing.
             raise ArgumentError.new(
-              "Failed to schedule dependency vdate #{vdate.id}"
+              "Failed to schedule vdate #{vdate.id}, which other vdates depend on"
             )
           end
+          # Anything else may fail silently
         end
       end
 
@@ -388,7 +391,7 @@ class VirtualDate
         return cmp if cmp != 0
 
         # 3. Stable ordering (ID)
-        (a.id || "") <=> (b.id || "")
+        a.id <=> b.id
       end
 
       result = [] of VirtualDate
@@ -420,7 +423,6 @@ class VirtualDate
     #
     # Times that match contiguously at `granularity` spacing coalesce into a single
     # occurrence starting at the first matching time.
-    # ameba:disable Metrics/CyclomaticComplexity
     private def occurrence_starts(vdate : VirtualDate, from : Time, to : Time, granularity : Time::Span, max_candidates : Int32) : Array(Time)
       # No due rules means the vdate is always on; a single candidate at window start
       return [from] if vdate.due.empty?
@@ -507,7 +509,8 @@ class VirtualDate
           end
 
         next unless start
-        next if start > to
+        # The window is half-open, so a start of exactly `to` is outside it
+        next if start >= to
         # Different bases can shift-resolve to the same start; schedule it once
         next unless seen_starts.add?(start)
 
@@ -516,7 +519,7 @@ class VirtualDate
 
           vdate.parallel.times do |i|
             t = start + stagger * i
-            break if t > to
+            break if t >= to
 
             next if vdate.omit_on?(t)
 
@@ -538,33 +541,28 @@ class VirtualDate
 
     # Schedules a vdate, resolving conflicts by shifting forward (using vdate.shift when Time::Span),
     # respecting vdate.fixed and max_shift/max_shifts.
+    #
+    # `depended_upon` is the set of vdates that others depend on; those are
+    # scheduled even when they conflict with a fixed vdate. It defaults to
+    # deriving that set from `#vdates`, and exists so that `#build` can compute
+    # it once instead of once per conflict.
     # ameba:disable Metrics/CyclomaticComplexity
-    def schedule_candidate(candidate : Candidate, scheduled_vdates : Array(Scheduled), *, horizon : Time) : Scheduled?
+    def schedule_candidate(candidate : Candidate, scheduled_vdates : Array(Scheduled), *, horizon : Time, depended_upon : Set(VirtualDate) = vdates_with_dependents) : Scheduled?
       vdate = candidate.vdate
       start = candidate.start
-      duration = vdate.duration || 0.seconds
-
-      if duration == 0.seconds
-        return nil if start > horizon
-        scheduled = Scheduled.new(vdate, start)
-        scheduled.explanation.add "Scheduled zero-duration vdate at #{start}"
-
-        if scheduled.explanation.lines.empty?
-          scheduled.explanation.add("Scheduled (no additional details)")
-        end
-        return scheduled
-      end
+      duration = vdate.duration
+      explanation = candidate.explanation
 
       loop do
         finish = start + duration
 
         # Horizon guard
         if finish > horizon
-          candidate.explanation.add("Rejected: finish #{finish} exceeds horizon #{horizon}")
+          explanation.add("Rejected: finish #{finish} exceeds horizon #{horizon}")
           return nil
         end
 
-        candidate = Scheduled.new(vdate, start, candidate.explanation)
+        scheduled = Scheduled.new(vdate, start, explanation)
 
         if deadline = vdate.deadline
           deadline_time =
@@ -576,19 +574,16 @@ class VirtualDate
             end
 
           if finish > deadline_time
-            candidate.explanation.add "Rejected: finish #{finish} exceeds hard deadline #{deadline_time}"
+            explanation.add "Rejected: finish #{finish} exceeds hard deadline #{deadline_time}"
             return nil
           end
         end
 
-        # Check parallelism / conflicts
-        if acceptable_parallelism?(candidate, scheduled_vdates)
-          candidate.explanation.add "Scheduled at #{start}, no conflicts, parallelism OK"
-
-          if candidate.explanation.lines.empty?
-            candidate.explanation.add("Scheduled (no additional details)")
-          end
-          return candidate
+        # Check parallelism / conflicts. A zero-duration vdate overlaps nothing,
+        # so it always lands here on the first pass.
+        if acceptable_parallelism?(scheduled, scheduled_vdates)
+          explanation.add "Scheduled at #{start}, no conflicts, parallelism OK"
+          return scheduled
         end
 
         # Conflict exists. Only vdates competing for the same parallelism slots
@@ -602,36 +597,42 @@ class VirtualDate
         if conflict
           if conflict.vdate.fixed?
             # If vdate has dependents, it must be scheduled even if it conflicts
-            if has_dependents?(vdate)
-              candidate.explanation.add("Scheduled despite conflicts because dependent vdates require it")
-
-              if candidate.explanation.lines.empty?
-                candidate.explanation.add("Scheduled (no additional details)")
-              end
-              return candidate
+            if depended_upon.includes? vdate
+              explanation.add("Scheduled despite conflicts because dependent vdates require it")
+              return scheduled
             end
 
             # Otherwise respect fixed semantics
             return nil if vdate.fixed?
 
-            candidate.explanation.add "Yielded to fixed vdate #{conflict.vdate.id} (#{conflict.start}-#{conflict.finish}), shifted from #{start} to #{conflict.finish}"
+            explanation.add "Yielded to fixed vdate #{conflict.vdate.id} (#{conflict.start}-#{conflict.finish}), shifted from #{start} to #{conflict.finish}"
             start = conflict.finish
             next
           end
 
           if vdate.fixed?
             scheduled_vdates.delete(conflict)
-            candidate.explanation.add "Displaced movable vdate #{conflict.vdate.id} because this vdate is fixed"
+            explanation.add "Displaced movable vdate #{conflict.vdate.id} because this vdate is fixed"
             next
           end
 
-          # Priority comparison
-          if vdate.priority > conflict.vdate.priority
+          # Priority comparison.
+          #
+          # An already-scheduled vdate that others depend on is not displaced:
+          # its dependents were placed relative to its finish time earlier in
+          # this pass, and removing it now would leave them anchored to a time
+          # that is no longer in the schedule. Priority is a preference, whereas
+          # a dependency is structural, so the dependency wins.
+          if vdate.priority > conflict.vdate.priority && !depended_upon.includes?(conflict.vdate)
             scheduled_vdates.delete(conflict)
-            candidate.explanation.add "Displaced lower-priority vdate #{conflict.vdate.id} (priority #{conflict.vdate.priority})"
+            explanation.add "Displaced lower-priority vdate #{conflict.vdate.id} (priority #{conflict.vdate.priority})"
+            next
+          elsif vdate.priority > conflict.vdate.priority
+            explanation.add "Yielded to vdate #{conflict.vdate.id} despite its lower priority, because other vdates depend on it; shifted from #{start} to #{conflict.finish}"
+            start = conflict.finish
             next
           elsif vdate.priority < conflict.vdate.priority
-            candidate.explanation.add "Yielded to higher-priority vdate #{conflict.vdate.id}, shifted from #{start} to #{conflict.finish}"
+            explanation.add "Yielded to higher-priority vdate #{conflict.vdate.id}, shifted from #{start} to #{conflict.finish}"
             start = conflict.finish
             next
           end
@@ -648,7 +649,7 @@ class VirtualDate
             1.minute
           end
 
-        candidate.explanation.add("Conflict unresolved; shifted forward by #{shift_span} to #{start + shift_span}")
+        explanation.add("Conflict unresolved; shifted forward by #{shift_span} to #{start + shift_span}")
 
         start += shift_span
       end
@@ -667,9 +668,18 @@ class VirtualDate
       end
     end
 
-    # Returns whether any vdates depend on this one
-    private def has_dependents?(vdate : VirtualDate) : Bool
-      @vdates.any?(&.depends_on.includes?(vdate))
+    # Returns the vdates that at least one other vdate depends on.
+    #
+    # Scheduling consults this per candidate and per conflict, so it is built in
+    # one pass rather than re-scanning every vdate's dependencies each time.
+    def vdates_with_dependents : Set(VirtualDate)
+      depended_upon = Set(VirtualDate).new
+
+      @vdates.each do |vdate|
+        vdate.depends_on.each { |dep| depended_upon << dep }
+      end
+
+      depended_upon
     end
 
     @[AlwaysInline]
@@ -690,29 +700,28 @@ class VirtualDate
     # Enforces per-vdate parallelism across overlapping scheduled_vdates sharing flags.
     private def acceptable_parallelism?(candidate : Scheduled, scheduled_vdates : Array(Scheduled)) : Bool
       c_start = candidate.start
-      duration = candidate.vdate.duration || 0.seconds
-      c_end = c_start + duration
-
+      c_end = candidate.finish
       limit = candidate.vdate.parallel
+      flags = candidate.vdate.flags
 
-      flags = candidate.flags
-      flags = [:__default] if flags.empty?
+      # Vdates without flags all compete within one implicit default group
+      if flags.empty?
+        concurrent = scheduled_vdates.count do |i|
+          i.vdate.flags.empty? && overlaps?(c_start, c_end, i.start, i.finish)
+        end
+
+        return concurrent + 1 <= limit
+      end
 
       flags.each do |flag|
         concurrent = 0
 
         scheduled_vdates.each do |i|
-          i_flags = i.flags
-          i_flags = [:__default] if i_flags.empty?
-          next unless i_flags.includes?(flag)
+          next unless i.vdate.flags.includes? flag
+          next unless overlaps?(c_start, c_end, i.start, i.finish)
 
-          i_start = i.start
-          i_end = i_start + (i.vdate.duration || 0.seconds)
-
-          if overlaps?(c_start, c_end, i_start, i_end)
-            concurrent += 1
-            return false if concurrent + 1 > limit
-          end
+          concurrent += 1
+          return false if concurrent + 1 > limit
         end
       end
 
@@ -783,7 +792,12 @@ class VirtualDate
   end
 
   # Holds a buffer of string explanations, for scheduling etc.
-  struct Explanation
+  #
+  # This is a reference type on purpose: a `Candidate` hands its buffer to the
+  # `Scheduled` it turns into, and both go on appending to the same buffer.
+  class Explanation
+    # Maximum number of messages kept. Once reached, a final overflow notice is
+    # appended and all further messages are dropped.
     MAX_LINES = 100
 
     property lines : Array(String)
@@ -792,15 +806,14 @@ class VirtualDate
       @lines = [] of String
     end
 
-    def add(msg : String)
-      if @lines.size > MAX_LINES
-        return false
-      end
+    # Appends `msg`, and returns whether it (and any further message) was kept.
+    def add(msg : String) : Bool
+      return false if @lines.size >= MAX_LINES
 
       @lines << msg
 
       if @lines.size == MAX_LINES
-        @lines << "Explanation buffer overflow (limit: #{MAX_LINES} messages)"
+        @lines[-1] = "Explanation buffer overflow (limit: #{MAX_LINES} messages)"
         return false
       end
 
@@ -986,62 +999,29 @@ class VirtualDate
         nodes = vdate_node.nodes
         i = 0
 
-        while i < nodes.size
-          key = nodes[i].as(YAML::Nodes::Scalar).value
+        while i + 1 < nodes.size
+          key_node = nodes[i]
           val = nodes[i + 1]
+          i += 2
 
-          case key
+          # A non-scalar key (e.g. a YAML complex key) is not one of ours
+          next unless key_node.is_a?(YAML::Nodes::Scalar)
+          next unless val.is_a?(YAML::Nodes::Scalar)
+
+          case key_node.value
           when "parallel"
-            if val.is_a?(YAML::Nodes::Scalar)
-              p = val.value.to_i?
-              if p && p < 1
-                errors << YamlError.new("'parallel' must be >= 1", val)
-              end
+            p = val.value.to_i?
+            if p && p < 1
+              errors << YamlError.new("'parallel' must be >= 1", val)
             end
           when "duration"
-            if val.is_a?(YAML::Nodes::Scalar)
-              d = val.value.to_i?
-              if d && d < 0
-                errors << YamlError.new("'duration' must be >= 0", val)
-              end
+            d = val.value.to_f?
+            if d && d < 0
+              errors << YamlError.new("'duration' must be >= 0", val)
             end
           end
-
-          i += 2
         end
       end
-    end
-
-    private def mapping_to_hash(node : YAML::Nodes::Mapping, errors : Array(YamlError))
-      h = {} of String => YAML::Nodes::Node
-      seen = {} of String => YAML::Nodes::Scalar
-
-      nodes = node.nodes
-      i = 0
-
-      while i < nodes.size
-        key_node = nodes[i]
-        val_node = nodes[i + 1]
-
-        if key_node.is_a?(YAML::Nodes::Scalar)
-          key = key_node.value
-
-          if prev = seen[key]?
-            errors << YamlError.new(
-              "Duplicate key '#{key}' (previous definition at line #{prev.start_line + 1})",
-              key_node
-            )
-          else
-            seen[key] = key_node
-          end
-
-          h[key] = val_node
-        end
-
-        i += 2
-      end
-
-      h
     end
   end
 
@@ -1076,7 +1056,11 @@ class VirtualDate
     def self.to_yaml(value : VirtualTime::TimeOrVirtualTime?, yaml : YAML::Nodes::Builder)
       case value
       when Time
-        yaml.scalar value.to_s
+        # Must be RFC 3339, because that is the only absolute-time format
+        # `.from_yaml` recognizes. `Time#to_s` renders "2023-05-10 10:00:00
+        # +02:00", which fails to parse and would then be misread as a
+        # VirtualTime rule.
+        yaml.scalar value.to_rfc3339(fraction_digits: 9)
       when VirtualTime
         yaml.scalar value.to_yaml
       when Nil
@@ -1096,7 +1080,8 @@ class VirtualDate
       # 1. Absolute time
       begin
         return Time.parse_rfc3339(value)
-      rescue
+      rescue Time::Format::Error
+        # Not an absolute time; fall through to parsing it as a rule
       end
 
       # 2. VirtualTime rule
@@ -1104,23 +1089,57 @@ class VirtualDate
     end
   end
 
+  # Renders and parses a `Time::Span` as a number of seconds.
+  #
+  # Whole spans are written as plain integers. Sub-second spans keep their
+  # fractional part, so that e.g. a `shift` of 500 milliseconds survives a
+  # round-trip instead of truncating to `0` -- which would silently read back
+  # as "no shift at all".
+  module SecondsSpan
+    PATTERN = /\A-?\d+(?:\.\d+)?\z/
+
+    # Returns `value` rendered as a (possibly fractional) number of seconds.
+    def self.to_scalar(value : Time::Span) : String
+      nanoseconds = value.nanoseconds
+      return value.to_i.to_s if nanoseconds == 0
+
+      sign = value < Time::Span.zero ? "-" : ""
+      fraction = nanoseconds.abs.to_s.rjust(9, '0').rstrip('0')
+      "#{sign}#{value.to_i.abs}.#{fraction}"
+    end
+
+    # Returns the `Time::Span` `value` denotes, or `nil` if it is not a number.
+    def self.from_scalar?(value : String) : Time::Span?
+      return nil unless value.matches? PATTERN
+
+      seconds, _, fraction = value.partition '.'
+      span = Time::Span.new(
+        seconds: seconds.lchop('-').to_i64,
+        nanoseconds: fraction.empty? ? 0i64 : fraction.ljust(9, '0')[0, 9].to_i64
+      )
+
+      seconds.starts_with?('-') ? -span : span
+    end
+  end
+
   class TimeSpanSecondsConverter
     def self.to_yaml(value : Time::Span, yaml : YAML::Nodes::Builder)
-      yaml.scalar value.total_seconds.to_i64
+      yaml.scalar SecondsSpan.to_scalar value
     end
 
     def self.from_yaml(ctx : YAML::ParseContext, node : YAML::Nodes::Node) : Time::Span
       unless node.is_a?(YAML::Nodes::Scalar)
-        node.raise "Expected integer seconds for Time::Span"
+        node.raise "Expected a number of seconds for Time::Span"
       end
-      Time::Span.new(seconds: node.value.to_i64)
+      SecondsSpan.from_scalar?(node.value) ||
+        node.raise "Expected a number of seconds for Time::Span, got #{node.value.inspect}"
     end
   end
 
   class NullableTimeSpanSecondsConverter
     def self.to_yaml(value : Time::Span?, yaml : YAML::Nodes::Builder)
       if value
-        yaml.scalar value.total_seconds.to_i64
+        yaml.scalar SecondsSpan.to_scalar value
       else
         yaml.scalar nil
       end
@@ -1129,9 +1148,10 @@ class VirtualDate
     def self.from_yaml(ctx : YAML::ParseContext, node : YAML::Nodes::Node) : Time::Span?
       return nil if YAML::Schema::Core.parse_null?(node)
       unless node.is_a?(YAML::Nodes::Scalar)
-        node.raise "Expected integer seconds for Time::Span?"
+        node.raise "Expected a number of seconds for Time::Span?"
       end
-      Time::Span.new(seconds: node.value.to_i64)
+      SecondsSpan.from_scalar?(node.value) ||
+        node.raise "Expected a number of seconds for Time::Span?, got #{node.value.inspect}"
     end
   end
 
@@ -1143,7 +1163,7 @@ class VirtualDate
       when Bool
         yaml.scalar value
       when Time::Span
-        yaml.scalar value.total_seconds.to_i64
+        yaml.scalar SecondsSpan.to_scalar value
       end
     end
 
@@ -1151,7 +1171,7 @@ class VirtualDate
       return nil if YAML::Schema::Core.parse_null?(node)
 
       unless node.is_a?(YAML::Nodes::Scalar)
-        node.raise "Expected null, bool, or integer seconds for shift"
+        node.raise "Expected null, bool, or a number of seconds for shift"
       end
 
       v = node.value
@@ -1160,12 +1180,9 @@ class VirtualDate
       return true if v == "true"
       return false if v == "false"
 
-      # Seconds (integer)
-      unless v =~ /^-?\d+$/
-        node.raise "Expected 'true', 'false', or integer seconds for shift, got #{v.inspect}"
-      end
-
-      Time::Span.new(seconds: v.to_i64)
+      # Seconds
+      SecondsSpan.from_scalar?(v) ||
+        node.raise "Expected 'true', 'false', or a number of seconds for shift, got #{v.inspect}"
     end
   end
 
@@ -1194,7 +1211,46 @@ class VirtualDate
       end
 
       lines << "END:VCALENDAR"
-      lines.join("\r\n") + "\r\n"
+
+      String.build do |io|
+        lines.each { |line| fold line, io }
+      end
+    end
+
+    # Maximum length in octets of one content line, per RFC 5545 section 3.1.
+    MAX_OCTETS = 75
+
+    # Writes `line` to `io`, wrapped as one or more CRLF-terminated content lines.
+    #
+    # RFC 5545 limits a content line to 75 octets, and requires longer ones to be
+    # split with a CRLF followed by a single space. Splitting must not fall inside
+    # a multi-byte character, so the line is measured and cut in bytes at
+    # character boundaries.
+    private def self.fold(line : String, io : IO) : Nil
+      # Fast path: nothing to fold (also the only path for pure-ASCII short lines)
+      if line.bytesize <= MAX_OCTETS
+        io << line << "\r\n"
+        return
+      end
+
+      # A continuation line spends one octet on its leading space
+      limit = MAX_OCTETS
+      octets = 0
+
+      line.each_char do |char|
+        size = char.bytesize
+
+        if octets + size > limit
+          io << "\r\n "
+          limit = MAX_OCTETS - 1
+          octets = 0
+        end
+
+        io << char
+        octets += size
+      end
+
+      io << "\r\n"
     end
 
     private def self.event(inst : Scheduled, now : Time) : Array(String)
@@ -1229,10 +1285,16 @@ class VirtualDate
       ICS_TIME_FORMAT.format(t.to_utc)
     end
 
-    # RFC 5545 escaping
+    # RFC 5545 escaping.
+    #
+    # The backslash must be escaped first, so that the backslashes introduced by
+    # the later substitutions are not escaped a second time. A bare CR is dropped
+    # rather than escaped, because RFC 5545 defines no escape for it and only
+    # `\n` may appear in a TEXT value.
     private def self.escape(s : String) : String
       s
         .gsub("\\", "\\\\")
+        .delete('\r')
         .gsub("\n", "\\n")
         .gsub(",", "\\,")
         .gsub(";", "\\;")

@@ -4,11 +4,13 @@ version: 0.0.1
 authors:
   - Davor Ocelic <docelic@crystallabs.io>
 
-crystal: 0.35.1
+crystal: ">= 1.19.0"
 
 license: AGPL-3.0
 
+# `test.cr` requires ../../src/virtualdate directly, so only VirtualDate's own
+# dependency needs to be installed here.
 dependencies:
   virtualtime:
     path: ../../virtualtime
-    version: ~> 1.0
+    version: ~> 1.5
