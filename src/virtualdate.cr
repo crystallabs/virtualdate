@@ -71,7 +71,9 @@ class VirtualDate
   property depends_on = [] of VirtualDate
 
   # Serialized form
-  @[YAML::Field(key: "depends_on")]
+  #
+  # Written out by `#on_to_yaml`, not by the generated serializer; see the note there.
+  @[YAML::Field(key: "depends_on", ignore_serialize: true)]
   property depends_on_ids = [] of String
 
   # Optional staggered parallel scheduling
@@ -103,8 +105,12 @@ class VirtualDate
     return true if direct == true
     return false if direct == false
 
-    # 2. Only Time::Span shifts can produce inverse reachability
-    shift = @shift
+    # 2. Only Time::Span shifts can produce inverse reachability.
+    #    An `#on` override of a span displaces the vdate in place of the
+    #    omit-driven `#shift` policy, so that is the step to search back along;
+    #    consulting `#shift` alone would report a vdate as never on even at the
+    #    very time `#resolve` says it lands on.
+    shift = @on.as?(Time::Span) || @shift
     return false unless shift.is_a?(Time::Span)
     return false if shift.total_nanoseconds == 0
 
@@ -146,12 +152,7 @@ class VirtualDate
     a.try do |a_val|
       case a_val
       when Time
-        case time
-        when Time
-          return if a_val > time
-        else
-          return unless time.matches?(a_val)
-        end
+        return if a_val > instant_of(time, hint)
       else
         return unless a_val.matches?(time)
       end
@@ -160,12 +161,7 @@ class VirtualDate
     z.try do |z_val|
       case z_val
       when Time
-        case time
-        when Time
-          return if z_val < time
-        else
-          return unless time.matches?(z_val)
-        end
+        return if z_val < instant_of(time, hint)
       else
         return unless z_val.matches?(time)
       end
@@ -296,6 +292,19 @@ class VirtualDate
     max_shifts && max_shifts <= 0
   end
 
+  # Returns the point in time `time` stands for, materializing it against
+  # `hint` if it is a pattern rather than an instant.
+  #
+  # An absolute `#begin` or `#end` bounds the instant, so it has to be compared
+  # with one. Matching the bound against the asked pattern instead would answer
+  # differently depending on how the very same moment was spelled: a
+  # `VirtualTime` for June 1 asked of a vdate beginning on May 10 would come
+  # back "not applicable", while the identical `Time` came back "on".
+  @[AlwaysInline]
+  private def instant_of(time : VirtualTime::TimeOrVirtualTime, hint) : Time
+    time.is_a?(Time) ? time : time.to_time(hint)
+  end
+
   # A simple, deterministic scheduler for VirtualDate vdates.
   #
   # This scheduler:
@@ -330,6 +339,25 @@ class VirtualDate
       end
     end
 
+    # Holds the vdates to the same limits `VirtualDateFile` enforces on a
+    # document, so that a value set in code cannot do what one read from YAML
+    # is refused for.
+    #
+    # A negative duration in particular has consequences beyond the vdate
+    # itself: it finishes before it starts, which switches off overlap
+    # detection, so other vdates are then free to take a slot it holds.
+    private def validate_vdates!
+      @vdates.each do |vdate|
+        if vdate.duration < Time::Span.zero
+          raise ArgumentError.new("duration of vdate '#{vdate.id}' must be >= 0")
+        end
+
+        if vdate.parallel < 1
+          raise ArgumentError.new("parallel of vdate '#{vdate.id}' must be >= 1")
+        end
+      end
+    end
+
     # Maximum number of step-iterator advances per due rule while scanning for
     # occurrence starts. Guards against effectively-continuous rules scanned at
     # too fine a granularity (e.g. an always-matching rule over a year-long window).
@@ -350,6 +378,7 @@ class VirtualDate
       raise ArgumentError.new("granularity must be positive") if granularity <= Time::Span.zero
       raise ArgumentError.new("max_candidates must be >= 1") if max_candidates < 1
 
+      validate_vdates!
       resolve_dependencies!
       validate_no_dependency_cycles!
 
@@ -1153,14 +1182,6 @@ class VirtualDate
     end
   end
 
-  # Dependencies built in code (via `depends_on`) would otherwise be lost on
-  # save, because only `depends_on_ids` is serialized. IDs loaded from YAML are
-  # kept as-is until `resolve_dependencies!` populates the object graph.
-  def to_yaml(yaml : YAML::Nodes::Builder)
-    @depends_on_ids = @depends_on.map(&.id) unless @depends_on.empty?
-    super
-  end
-
   # `YAML::Serializable` tests a converter-backed property for truthiness
   # before handing it to the converter, so a value of `false` is written out as
   # null and read back as `nil`. For `shift` that would turn "due but
@@ -1176,6 +1197,15 @@ class VirtualDate
       yaml.scalar "on"
       ShiftConverter.to_yaml status, yaml
     end
+
+    # Dependencies built in code live in `#depends_on`, while ids read from
+    # YAML stay in `#depends_on_ids` until `#resolve_dependencies!` links them
+    # up; whichever of the two holds them is written out. Deriving the ids here
+    # rather than assigning them keeps `#to_yaml` from altering the very object
+    # it is serializing -- which it used to do, changing what a later
+    # `Scheduler#build` made of the same vdate.
+    yaml.scalar "depends_on"
+    (@depends_on.empty? ? @depends_on_ids : @depends_on.map(&.id)).to_yaml yaml
   end
 
   private def unwrap_shift_result(r : VirtualTime::Result::Result) : Time::Span?

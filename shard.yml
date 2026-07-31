@@ -20,8 +20,9 @@ targets:
 dependencies:
   virtualtime:
     github: crystallabs/virtualtime
-    # The scheduler relies on VirtualTime#to_time and Search fixes from 1.5.0
-    version: ~> 1.5
+    # The scheduler generates occurrences with VirtualTime#step, so it relies on
+    # 1.7.0's forward-only, DST-correct and location-aware materialization
+    version: ~> 1.7
 
 development_dependencies:
   ameba:

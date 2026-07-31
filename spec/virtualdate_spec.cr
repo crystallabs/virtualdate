@@ -38,6 +38,25 @@ describe VirtualDate do
     vd.strict_on?(Time.local(2023, 5, 21)).should be_nil
   end
 
+  it "compares an absolute begin/end against the instant, however it was asked for" do
+    vd = VirtualDate.new
+    vd.begin = Time.local(2023, 5, 10, 9, 0, 0)
+    vd.end = Time.local(2023, 8, 1)
+    vd.due << VirtualTime.new(hour: 10)
+
+    moment = Time.local(2023, 6, 1, 10, 0, 0)
+    asked = VirtualTime.new(year: 2023, month: 6, day: 1, hour: 10, minute: 0, second: 0, nanosecond: 0)
+
+    # Regression: an absolute bound was matched *against* a VirtualTime query
+    # rather than against the moment it stands for, so the very same instant
+    # came back "not applicable" as a pattern and "on" as a Time
+    vd.strict_on?(moment).should be_true
+    vd.strict_on?(asked, hint: moment).should be_true
+
+    outside = VirtualTime.new(year: 2023, month: 1, day: 1, hour: 10, minute: 0, second: 0, nanosecond: 0)
+    vd.strict_on?(outside, hint: Time.local(2023, 1, 1)).should be_nil
+  end
+
   it "on override takes precedence over begin/end" do
     vd = VirtualDate.new
     vd.begin = Time.local(2023, 1, 1)
@@ -1536,6 +1555,22 @@ describe "VirtualDate – advanced scheduling" do
     vd.on?(Time.local(2023, 5, 9)).should be_false
   end
 
+  it "on? follows an `on` override that is a span" do
+    vd = VirtualDate.new
+    vd.due << VirtualTime.new(hour: 10)
+    vd.on = 2.hours
+
+    asked = Time.local(2023, 5, 10, 10, 0)
+    landed = Time.local(2023, 5, 10, 12, 0)
+
+    vd.resolve(asked).should eq landed
+
+    # Regression: the inverse search consulted `#shift` only, so a vdate
+    # displaced by its `#on` override reported false even at the very time
+    # `#resolve` says it lands on
+    vd.on?(landed).should be_true
+  end
+
   it "on? does not treat true as inverse-reachable" do
     vd = VirtualDate.new
     date = Time.local(2023, 5, 10)
@@ -1762,6 +1797,31 @@ describe "VirtualDate – advanced scheduling" do
     scheduled = scheduler.build(Time.local(2023, 5, 10), Time.local(2023, 5, 11, 10, 0))
     scheduled.map(&.vdate.id).should eq ["a", "b"]
     scheduled.first.start.should eq Time.local(2023, 5, 10, 9, 0)
+  end
+
+  it "refuses to build vdates that a YAML document would be rejected for" do
+    from, to = Time.local(2023, 5, 10), Time.local(2023, 5, 11)
+
+    # Regression: a negative duration finishes before it starts, which switches
+    # off overlap detection -- the vdate then silently shared a slot with a
+    # `parallel: 1` one, and `#on_in_schedule?` never reported it as on
+    vdate = VirtualDate.new("bad")
+    vdate.due << VirtualTime.new(hour: 10)
+    vdate.duration = -1.hour
+
+    expect_raises(ArgumentError, /duration of vdate 'bad' must be >= 0/) do
+      VirtualDate::Scheduler.new([vdate]).build(from, to)
+    end
+
+    vdate.duration = 1.hour
+    vdate.parallel = 0
+
+    expect_raises(ArgumentError, /parallel of vdate 'bad' must be >= 1/) do
+      VirtualDate::Scheduler.new([vdate]).build(from, to)
+    end
+
+    vdate.parallel = 1
+    VirtualDate::Scheduler.new([vdate]).build(from, to).size.should eq 1
   end
 
   it "does not let a fixed vdate displace one that others depend on" do
@@ -2055,6 +2115,29 @@ describe "VirtualDate – advanced scheduling" do
     scheduler = VirtualDate::Scheduler.new(restored)
     dep = scheduler.vdates.find! { |vdate| vdate.id == "b" }.depends_on
     dep.map(&.id).should eq ["a"]
+
+    # Regression: the ids were derived by assigning to `#depends_on_ids`, so
+    # serializing altered the object -- enough to change what a later
+    # `Scheduler#build` did with it
+    b.depends_on_ids.should be_empty
+  end
+
+  it "does not change a vdate by serializing it" do
+    dependency = VirtualDate.new("a")
+
+    vdate = VirtualDate.new("b")
+    vdate.duration = 1.hour
+    vdate.due << VirtualTime.new(hour: 8)
+    vdate.depends_on << dependency
+
+    # A scheduler that does not know about the dependency: "b" simply cannot
+    # be placed, both before and after the schedule is written out
+    scheduler = VirtualDate::Scheduler.new([vdate])
+    from, to = Time.local(2023, 5, 10), Time.local(2023, 5, 11)
+
+    scheduler.build(from, to).should be_empty
+    vdate.to_yaml
+    scheduler.build(from, to).should be_empty
   end
 
   it "loads a schema_version document via VirtualDateFile.load" do
