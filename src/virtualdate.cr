@@ -3,8 +3,8 @@ require "virtualtime"
 # VirtualDate builds on VirtualTime to represent due/omit rules plus higher-level scheduling semantics.
 class VirtualDate
   VERSION_MAJOR    = 1
-  VERSION_MINOR    = 3
-  VERSION_REVISION = 1
+  VERSION_MINOR    = 4
+  VERSION_REVISION = 0
   VERSION          = [VERSION_MAJOR, VERSION_MINOR, VERSION_REVISION].join '.'
 
   include YAML::Serializable
@@ -30,7 +30,9 @@ class VirtualDate
   # - false: treat the vdate as not due due to falling on an omitted date/time, after a reschedule was not attempted or was not able to find another spot
   # - true: treat the vdate as due regardless of falling on an omitted date/time
   # - Time::Span: shift the scheduled date/time by specified time span. Can be negative or positive.
-  @[YAML::Field(converter: VirtualDate::ShiftConverter)]
+  #
+  # Written out by `#on_to_yaml`, not by the generated serializer; see the note there.
+  @[YAML::Field(converter: VirtualDate::ShiftConverter, ignore_serialize: true)]
   property shift : Nil | Bool | Time::Span = false
 
   # Max amount of total time by which vdate can be shifted before it's considered unschedulable (false)
@@ -42,7 +44,9 @@ class VirtualDate
 
   # Fixed override of `#on?` for this vdate. If set, takes precedence over begin/end/due/omit.
   # Same union as `#shift`.
-  @[YAML::Field(converter: VirtualDate::ShiftConverter)]
+  #
+  # Written out by `#on_to_yaml`, not by the generated serializer; see the note there.
+  @[YAML::Field(converter: VirtualDate::ShiftConverter, ignore_serialize: true)]
   property on : Nil | Bool | Time::Span
 
   @[YAML::Field(converter: VirtualDate::TimeSpanSecondsConverter)]
@@ -197,8 +201,11 @@ class VirtualDate
     nil
   end
 
+  # Returns whether any of the vdate's `#due` rules is on at `time`.
+  #
+  # An empty list means the vdate is always due.
   def due_on?(time : VirtualTime::TimeOrVirtualTime = Time.local, times = @due)
-    due_on_any_date?(time, times) && due_on_any_time?(time, times)
+    matches_any?(time, times, true)
   end
 
   def due_on_any_date?(time : VirtualTime::TimeOrVirtualTime = Time.local, times = @due)
@@ -209,8 +216,11 @@ class VirtualDate
     matches_any_time?(time, times, true)
   end
 
+  # Returns whether any of the vdate's `#omit` rules covers `time`.
+  #
+  # An empty list means the vdate is never omitted.
   def omit_on?(time : VirtualTime::TimeOrVirtualTime = Time.local, times = @omit)
-    omit_on_dates?(time, times) && omit_on_times?(time, times)
+    matches_any?(time, times, nil)
   end
 
   def omit_on_dates?(time : VirtualTime::TimeOrVirtualTime = Time.local, times = @omit)
@@ -221,6 +231,25 @@ class VirtualDate
     matches_any_time?(time, times, nil)
   end
 
+  # Returns `default` if `times` is empty, `true` if at least one of them
+  # matches `time` outright, and `nil` otherwise.
+  #
+  # A rule has to match on both its date and its time part. Taking the date
+  # from one rule and the time from another would report a match that none of
+  # the rules on its own expresses -- and would, for instance, make an `omit`
+  # of "December 25" together with "12:00" omit every instant of the year,
+  # since the first rule constrains no time and the second no date.
+  def matches_any?(time : VirtualTime::TimeOrVirtualTime, times : Array(VirtualTime), default)
+    return default if times.size == 0
+    times.each do |vtime|
+      return true if vtime.matches?(time)
+    end
+    nil
+  end
+
+  # :ditto:
+  #
+  # Considers only the date part of each rule.
   def matches_any_date?(time : VirtualTime::TimeOrVirtualTime, times : Array(VirtualTime), default)
     return default if times.size == 0
     times.each do |vtime|
@@ -229,6 +258,9 @@ class VirtualDate
     nil
   end
 
+  # :ditto:
+  #
+  # Considers only the time part of each rule.
   def matches_any_time?(time : VirtualTime::TimeOrVirtualTime, times : Array(VirtualTime), default)
     return default if times.size == 0
     times.each do |vtime|
@@ -280,13 +312,22 @@ class VirtualDate
     property vdates : Array(VirtualDate)
 
     def initialize(@vdates = [] of VirtualDate)
+      resolve_dependencies!
+      validate_no_dependency_cycles!
+    end
+
+    # Turns each vdate's serialized `depends_on` ids into object references.
+    #
+    # `#build` runs this too, because `#vdates` is writable: a vdate appended
+    # after construction -- one just loaded from YAML, say -- would otherwise
+    # keep its dependencies as unresolved ids and be scheduled as though it had
+    # none, quite possibly before the vdates it depends on.
+    def resolve_dependencies!
       index = @vdates.to_h { |vdate| {vdate.id, vdate} }
 
       @vdates.each do |vdate|
         vdate.resolve_dependencies!(index)
       end
-
-      validate_no_dependency_cycles!
     end
 
     # Maximum number of step-iterator advances per due rule while scanning for
@@ -309,6 +350,7 @@ class VirtualDate
       raise ArgumentError.new("granularity must be positive") if granularity <= Time::Span.zero
       raise ArgumentError.new("max_candidates must be >= 1") if max_candidates < 1
 
+      resolve_dependencies!
       validate_no_dependency_cycles!
 
       scheduled_vdates = [] of Scheduled
@@ -326,6 +368,9 @@ class VirtualDate
 
         candidates = generate_candidates(vdate, from, to, granularity, max_candidates)
 
+        placed = false
+        rejected = false
+
         candidates.each do |candidate|
           if dependency_floor && dependency_floor > candidate.start
             original_start = candidate.start
@@ -336,16 +381,23 @@ class VirtualDate
           scheduled_vdate = schedule_candidate(candidate, scheduled_vdates, horizon: to, depended_upon: depended_upon)
 
           if scheduled_vdate
+            placed = true
             scheduled_vdates << scheduled_vdate
             scheduled_index[scheduled_vdate.vdate] = scheduled_vdate
-          elsif depended_upon.includes? vdate
-            # A vdate that others depend on must never be silently dropped,
-            # or those dependents would be scheduled against nothing.
-            raise ArgumentError.new(
-              "Failed to schedule vdate #{vdate.id}, which other vdates depend on"
-            )
+          else
+            rejected = true
           end
-          # Anything else may fail silently
+          # A rejected candidate may fail silently
+        end
+
+        # A vdate that others depend on must never be silently dropped, or
+        # those dependents would be scheduled against nothing. Losing some of
+        # its occurrences is fine though -- a later one may simply not fit in
+        # the window -- as long as at least one of them was placed.
+        if rejected && !placed && depended_upon.includes? vdate
+          raise ArgumentError.new(
+            "Failed to schedule vdate #{vdate.id}, which other vdates depend on"
+          )
         end
       end
 
@@ -553,7 +605,41 @@ class VirtualDate
       duration = vdate.duration
       explanation = candidate.explanation
 
+      # Conflict resolution moves a vdate forward, so it is bounded by the same
+      # two limits as omit-driven rescheduling -- otherwise a `max_shift` of
+      # half an hour would not stop a 10:00 vdate from ending up at 23:00.
+      origin = start
+      previous_start = start
+      max_shift = vdate.max_shift
+      max_shifts = vdate.max_shifts
+      shifts = 0
+
       loop do
+        if start != previous_start
+          previous_start = start
+          shifts += 1
+
+          if shifts > max_shifts
+            explanation.add "Rejected: conflict shifting exceeded max_shifts (#{max_shifts})"
+            return nil
+          end
+
+          if max_shift && (start - origin) > max_shift
+            explanation.add "Rejected: shifting to #{start} exceeds max_shift (#{max_shift})"
+            return nil
+          end
+        end
+
+        # Two instances of one vdate at the very same start are one occurrence
+        # counted twice, whatever `#parallel` allows for overlapping ones.
+        # Several of them can converge here: occurrences before a dependency
+        # floor all move onto it, and conflict resolution can walk two of them
+        # onto a single start.
+        if scheduled_vdates.any? { |i| i.vdate.same?(vdate) && i.start == start }
+          explanation.add "Rejected: #{vdate.id} is already scheduled at #{start}"
+          return nil
+        end
+
         finish = start + duration
 
         # Horizon guard
@@ -611,6 +697,25 @@ class VirtualDate
           end
 
           if vdate.fixed?
+            # An already-scheduled vdate that others depend on is not
+            # displaced, for the same reason as in the priority comparison
+            # below: its dependents are placed relative to its finish time, and
+            # removing it would leave them anchored to a time that is no longer
+            # in the schedule. Being fixed is a statement about movement,
+            # whereas a dependency is structural, so the dependency wins.
+            if depended_upon.includes? conflict.vdate
+              # Unless this vdate is depended on as well, which is the same
+              # standoff the fixed-versus-fixed case above settles by
+              # scheduling regardless.
+              if depended_upon.includes? vdate
+                explanation.add "Scheduled despite conflicts because dependent vdates require it"
+                return scheduled
+              end
+
+              explanation.add "Not scheduled: being fixed, it cannot move, and it must not displace vdate #{conflict.vdate.id}, which other vdates depend on"
+              return nil
+            end
+
             scheduled_vdates.delete(conflict)
             explanation.add "Displaced movable vdate #{conflict.vdate.id} because this vdate is fixed"
             next
@@ -698,6 +803,11 @@ class VirtualDate
     end
 
     # Enforces per-vdate parallelism across overlapping scheduled_vdates sharing flags.
+    #
+    # `parallel` states how much overlap a vdate itself tolerates, so a set of
+    # overlapping vdates is capped by the smallest limit among them: placing a
+    # `parallel: 2` vdate on top of an already-scheduled `parallel: 1` one would
+    # otherwise break the latter's constraint after the fact.
     private def acceptable_parallelism?(candidate : Scheduled, scheduled_vdates : Array(Scheduled)) : Bool
       c_start = candidate.start
       c_end = candidate.finish
@@ -706,8 +816,14 @@ class VirtualDate
 
       # Vdates without flags all compete within one implicit default group
       if flags.empty?
-        concurrent = scheduled_vdates.count do |i|
-          i.vdate.flags.empty? && overlaps?(c_start, c_end, i.start, i.finish)
+        concurrent = 0
+
+        scheduled_vdates.each do |i|
+          next unless i.vdate.flags.empty?
+          next unless overlaps?(c_start, c_end, i.start, i.finish)
+
+          concurrent += 1
+          limit = i.vdate.parallel if i.vdate.parallel < limit
         end
 
         return concurrent + 1 <= limit
@@ -715,13 +831,15 @@ class VirtualDate
 
       flags.each do |flag|
         concurrent = 0
+        flag_limit = limit
 
         scheduled_vdates.each do |i|
           next unless i.vdate.flags.includes? flag
           next unless overlaps?(c_start, c_end, i.start, i.finish)
 
           concurrent += 1
-          return false if concurrent + 1 > limit
+          flag_limit = i.vdate.parallel if i.vdate.parallel < flag_limit
+          return false if concurrent + 1 > flag_limit
         end
       end
 
@@ -1043,6 +1161,23 @@ class VirtualDate
     super
   end
 
+  # `YAML::Serializable` tests a converter-backed property for truthiness
+  # before handing it to the converter, so a value of `false` is written out as
+  # null and read back as `nil`. For `shift` that would turn "due but
+  # unschedulable" into "not scheduled at all" -- and `false` is its default --
+  # while for `on` it would drop a hard "never on" override altogether. Both
+  # are therefore emitted here; reading them still goes through
+  # `ShiftConverter`.
+  protected def on_to_yaml(yaml : YAML::Nodes::Builder)
+    yaml.scalar "shift"
+    ShiftConverter.to_yaml @shift, yaml
+
+    unless (status = @on).nil?
+      yaml.scalar "on"
+      ShiftConverter.to_yaml status, yaml
+    end
+  end
+
   private def unwrap_shift_result(r : VirtualTime::Result::Result) : Time::Span?
     case r
     when VirtualTime::Result::Found
@@ -1268,7 +1403,10 @@ class VirtualDate
         "UID:#{escape(uid)}",
         "DTSTAMP:#{format_time(now)}",
         "DTSTART:#{format_time(inst.start)}",
-        "DTEND:#{format_time(inst.finish)}",
+        # RFC 5545 section 3.8.2.2 requires DTEND to be strictly later than
+        # DTSTART, so a zero-duration vdate leaves it out -- which the RFC
+        # defines as an event ending at the very time it starts.
+        inst.finish > inst.start ? "DTEND:#{format_time(inst.finish)}" : nil,
         "SUMMARY:#{escape(inst.vdate.id)}",
         "DESCRIPTION:#{escape(description)}",
         categories(inst),

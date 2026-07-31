@@ -274,6 +274,37 @@ describe VirtualDate do
     vd.omit_on?(Time.local(2023, 3, 15, 10, 0)).should be_nil
   end
 
+  it "requires a single rule to match, not a date from one and a time from another" do
+    # "Omit Christmas Day, and omit the lunch hour."
+    #
+    # Regression: `omit_on?` was `omit_on_dates? && omit_on_times?` over the
+    # whole list, so the first rule (which constrains no time) satisfied the
+    # time half and the second (which constrains no date) the date half --
+    # every instant of the year came out omitted.
+    vd = VirtualDate.new
+    vd.due << VirtualTime.new(hour: 9, minute: 0, second: 0, nanosecond: 0)
+    vd.omit << VirtualTime.new(month: 12, day: 25)
+    vd.omit << VirtualTime.new(hour: 12)
+
+    vd.omit_on?(Time.local(2023, 12, 25, 9, 0)).should be_true
+    vd.omit_on?(Time.local(2023, 6, 1, 12, 0)).should be_true
+    vd.omit_on?(Time.local(2023, 6, 1, 9, 0)).should be_nil
+    vd.strict_on?(Time.local(2023, 6, 1, 9, 0)).should be_true
+
+    # Likewise for `due`: a time no single rule covers is not due
+    vd = VirtualDate.new
+    vd.due << VirtualTime.new(day: 15, hour: 9)
+    vd.due << VirtualTime.new(day: 20, hour: 14)
+
+    vd.due_on?(Time.local(2023, 3, 15, 14, 0)).should be_nil
+    vd.due_on?(Time.local(2023, 3, 15, 9, 0)).should be_true
+    vd.due_on?(Time.local(2023, 3, 20, 14, 0)).should be_true
+
+    # The date-only and time-only halves stay available on their own
+    vd.due_on_any_date?(Time.local(2023, 3, 15, 14, 0)).should be_true
+    vd.due_on_any_time?(Time.local(2023, 3, 15, 14, 0)).should be_true
+  end
+
   it "supports ranges" do
     date = Time.parse_local("2017-3-15", "%F")
 
@@ -1472,6 +1503,30 @@ describe "VirtualDate – advanced scheduling" do
       description.should_not contain("Explanation(@lines")
       description.should contain("Scheduled")
     end
+
+    it "omits DTEND for a zero-duration vdate" do
+      scheduler = VirtualDate::Scheduler.new
+
+      vdate = VirtualDate.new("instant")
+      vdate.duration = 0.seconds
+      vdate.due << VirtualTime.new(hour: 10)
+
+      scheduler.vdates << vdate
+
+      scheduled = scheduler.build(Time.local(2023, 5, 10), Time.local(2023, 5, 11))
+      ics = VirtualDate::ICS.export(scheduled)
+
+      # Regression: DTEND was emitted equal to DTSTART, which RFC 5545 section
+      # 3.8.2.2 forbids -- it must be strictly later. Leaving it out is the
+      # RFC's own way of saying the event ends when it starts.
+      ics.should contain "DTSTART:"
+      ics.should_not contain "DTEND:"
+
+      # A vdate that does last a while still gets one
+      vdate.duration = 1.hour
+      scheduled = scheduler.build(Time.local(2023, 5, 10), Time.local(2023, 5, 11))
+      VirtualDate::ICS.export(scheduled).should contain "DTEND:"
+    end
   end
 
   it "on? returns false when strict_on? is nil" do
@@ -1689,6 +1744,174 @@ describe "VirtualDate – advanced scheduling" do
     scheduled.map(&.vdate.id).should eq ["a"]
   end
 
+  it "keeps a depended-upon vdate whose later occurrence does not fit the window" do
+    a = VirtualDate.new("a")
+    a.duration = 2.hours
+    a.due << VirtualTime.new(hour: 9)
+
+    b = VirtualDate.new("b")
+    b.duration = 30.minutes
+    b.depends_on << a
+    b.due << VirtualTime.new(hour: 14)
+
+    scheduler = VirtualDate::Scheduler.new([a, b])
+
+    # Regression: any rejected candidate of a depended-upon vdate raised, so a
+    # second occurrence running past the horizon failed the whole build even
+    # though the first one had been scheduled
+    scheduled = scheduler.build(Time.local(2023, 5, 10), Time.local(2023, 5, 11, 10, 0))
+    scheduled.map(&.vdate.id).should eq ["a", "b"]
+    scheduled.first.start.should eq Time.local(2023, 5, 10, 9, 0)
+  end
+
+  it "does not let a fixed vdate displace one that others depend on" do
+    dep = VirtualDate.new("b") # movable, and "e" depends on it
+    dep.duration = 2.hours
+    dep.due << VirtualTime.new(hour: 9)
+
+    gate = VirtualDate.new("c") # keeps "f" out of the initial ready set
+    gate.duration = 10.minutes
+    gate.due << VirtualTime.new(hour: 8)
+
+    fixed = VirtualDate.new("f") # fixed, and therefore scheduled after "b"
+    fixed.fixed = true
+    fixed.duration = 2.hours
+    fixed.due << VirtualTime.new(hour: 9)
+    fixed.depends_on << gate
+
+    follower = VirtualDate.new("e")
+    follower.duration = 30.minutes
+    follower.depends_on << dep
+    follower.due << VirtualTime.new(hour: 9)
+
+    scheduled = VirtualDate::Scheduler.new([dep, gate, fixed, follower])
+      .build(Time.local(2023, 5, 10), Time.local(2023, 5, 11))
+
+    # Regression: only the priority comparison refused to displace a
+    # depended-upon vdate; a fixed one displaced "b" anyway, leaving "e"
+    # scheduled after a finish time that was no longer in the schedule
+    scheduled.map(&.vdate.id).should eq ["c", "b", "e"]
+    scheduled.find! { |i| i.vdate.id == "e" }.start.should eq Time.local(2023, 5, 10, 11, 0)
+  end
+
+  it "resolves dependencies of vdates appended after construction" do
+    yaml = <<-YAML
+      ---
+      schema_version: 2
+      vdates:
+      - id: a
+        duration: 3600
+        due:
+        - hour: 9
+          default_match: true
+      - id: b
+        duration: 3600
+        depends_on:
+        - a
+        due:
+        - hour: 8
+          default_match: true
+      YAML
+
+    scheduler = VirtualDate::Scheduler.new
+    VirtualDate::VirtualDateFile.load(yaml).each { |vdate| scheduler.vdates << vdate }
+
+    # Regression: ids were turned into references only by the constructor, so a
+    # vdate appended afterwards kept its dependencies unresolved and was
+    # scheduled as though it had none -- "b" ran at 08:00, before "a"
+    scheduled = scheduler.build(Time.local(2023, 5, 10), Time.local(2023, 5, 11))
+    scheduled.map { |i| {i.vdate.id, i.start} }.should eq [
+      {"a", Time.local(2023, 5, 10, 9, 0)},
+      {"b", Time.local(2023, 5, 10, 10, 0)},
+    ]
+  end
+
+  it "never schedules one vdate twice at the same start" do
+    # Occurrences that fall before a dependency floor all move onto it
+    anchor = VirtualDate.new("anchor")
+    anchor.duration = 1.hour
+    anchor.due << VirtualTime.new(day: 12, hour: 9)
+
+    follower = VirtualDate.new("follower")
+    follower.duration = 0.seconds
+    follower.depends_on << anchor
+    follower.due << VirtualTime.new(hour: 8)
+
+    scheduled = VirtualDate::Scheduler.new([anchor, follower])
+      .build(Time.local(2023, 5, 10), Time.local(2023, 5, 14))
+
+    # Regression: the May 10, 11 and 12 occurrences of "follower" were each
+    # moved to the floor and scheduled there, three times over
+    starts = scheduled.select { |i| i.vdate.id == "follower" }.map(&.start)
+    starts.should eq starts.uniq
+
+    # And conflict resolution can walk two occurrences onto one start
+    fixed = VirtualDate.new("fixed")
+    fixed.fixed = true
+    fixed.duration = 1.hour
+    fixed.flags << "task"
+    fixed.due << VirtualTime.new(hour: 10)
+
+    twice = VirtualDate.new("twice")
+    twice.duration = 1.hour
+    twice.parallel = 2
+    twice.flags << "task"
+    twice.due << VirtualTime.new(hour: 10)
+    twice.due << VirtualTime.new(hour: 11)
+
+    scheduled = VirtualDate::Scheduler.new([fixed, twice])
+      .build(Time.local(2023, 5, 10), Time.local(2023, 5, 11))
+
+    starts = scheduled.select { |i| i.vdate.id == "twice" }.map(&.start)
+    starts.should eq [Time.local(2023, 5, 10, 11, 0)]
+  end
+
+  it "bounds conflict-driven shifting by max_shift" do
+    blocker = VirtualDate.new("blocker")
+    blocker.fixed = true
+    blocker.duration = 6.hours
+    blocker.due << VirtualTime.new(hour: 10)
+
+    movable = VirtualDate.new("movable")
+    movable.duration = 1.hour
+    movable.due << VirtualTime.new(hour: 10)
+
+    from, to = Time.local(2023, 5, 10), Time.local(2023, 5, 11)
+
+    # Regression: conflict resolution shifted forward until the horizon,
+    # ignoring the vdate's own limits, so a 10:00 vdate could land at 16:00
+    movable.max_shift = 30.minutes
+    VirtualDate::Scheduler.new([blocker, movable]).build(from, to)
+      .map(&.vdate.id).should eq ["blocker"]
+
+    # Without a limit it still yields to the fixed vdate as before
+    movable.max_shift = nil
+    VirtualDate::Scheduler.new([blocker, movable]).build(from, to)
+      .map(&.start).should eq [Time.local(2023, 5, 10, 10, 0), Time.local(2023, 5, 10, 16, 0)]
+  end
+
+  it "caps parallelism by the strictest limit among overlapping vdates" do
+    tolerant = VirtualDate.new("tolerant")
+    tolerant.duration = 1.hour
+    tolerant.flags << "meeting"
+    tolerant.parallel = 2
+    tolerant.due << VirtualTime.new(hour: 10)
+
+    strict = VirtualDate.new("strict")
+    strict.duration = 1.hour
+    strict.flags << "meeting"
+    strict.parallel = 1
+    strict.due << VirtualTime.new(hour: 10)
+
+    # Regression: only the candidate's own `parallel` was consulted, so a
+    # tolerant vdate was placed on top of an already-scheduled strict one and
+    # broke the latter's limit after the fact
+    scheduled = VirtualDate::Scheduler.new([strict, tolerant])
+      .build(Time.local(2023, 5, 10), Time.local(2023, 5, 11))
+
+    scheduled.map(&.start).should eq [Time.local(2023, 5, 10, 10, 0), Time.local(2023, 5, 10, 11, 0)]
+  end
+
   it "schedules zero-duration vdates without blocking others" do
     scheduler = VirtualDate::Scheduler.new
 
@@ -1752,6 +1975,26 @@ describe "VirtualDate – advanced scheduling" do
     vd2.due.size.should eq 1
     vd2.omit.size.should eq 1
     vd2.flags.should eq Set{"work"}
+  end
+
+  it "round-trips a `false` shift and `on` through YAML" do
+    vd = VirtualDate.new("falsey")
+
+    # Regression: `YAML::Serializable` tests a converter-backed property for
+    # truthiness before handing it to the converter, so `false` was written out
+    # as null and read back as nil -- turning "due but unschedulable" into "not
+    # scheduled at all", and dropping an `on: false` override altogether.
+    # `false` is `shift`'s own default, so this affected every vdate saved.
+    vd.shift.should be_false
+    vd.to_yaml.should contain "shift: false"
+    VirtualDate.from_yaml(vd.to_yaml).shift.should be_false
+
+    vd.on = false
+    vd.to_yaml.should contain "on: false"
+    VirtualDate.from_yaml(vd.to_yaml).on.should be_false
+
+    vd.on = nil
+    VirtualDate.from_yaml(vd.to_yaml).on.should be_nil
   end
 
   it "round-trips absolute begin/end/deadline times through YAML" do
