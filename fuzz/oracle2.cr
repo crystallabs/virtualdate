@@ -101,7 +101,7 @@ puts
 cut_fails = 0
 60.times do |i|
   v = VirtualDate.new("c#{i}")
-  v.due << VirtualTime.new(minute: [0, 30])                # dense: every half hour
+  v.due << VirtualTime.new(minute: [0, 30])                      # dense: every half hour
   v.due << VirtualTime.new(hour: R.rand(24), minute: R.rand(60)) # sparse
   v.due << VirtualTime.new(day: 1 + R.rand(28), hour: R.rand(24)) if R.rand(2) == 0
 
