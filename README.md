@@ -153,6 +153,7 @@ Thus, altogether class `VirtualDate` has the following properties:
 - `stagger`, if scheduling in parallel, by how much time to stagger/sequence/order each parallel vdate
 - `priority`, higher = schedule first
 - `fixed`, whether this vdate is fixed/immovable
+- `clamp_to_begin`, whether the Scheduler starts an occurrence already running at an absolute `begin` at that `begin` (default: such an occurrence is dropped)
 - `id`, unique ID (string)
 - `depends_on`, list of vdates it depends on
 - `deadline`, will fail to schedule if it can't complete before this
@@ -184,6 +185,12 @@ and probably not something to be used.
 ## Scheduling
 
 There is support for loading/saving schedule to YAML and exporting to iCal.
+
+## Tests
+
+Run `crystal spec`. Longer-running scheduler oracles and fuzzers live in
+`fuzz/`; run them all with `fuzz/run.sh` (see `fuzz/README.md`). They are
+suited for release checks or a nightly CI job rather than every test run.
 
 
 # Other Projects

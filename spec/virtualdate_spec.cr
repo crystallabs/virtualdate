@@ -2397,6 +2397,222 @@ describe "VirtualDate – advanced scheduling" do
     vdate.on?(Time.utc(2023, 1, 1)).should be_false
   end
 
+  it "clamps an occurrence already running at #begin when clamp_to_begin is set" do
+    vdate = VirtualDate.new("meeting")
+    vdate.due << VirtualTime.new(hour: 8..12)
+    vdate.begin = Time.utc(2023, 5, 10, 10, 30)
+
+    from = Time.utc(2023, 5, 10)
+    to = Time.utc(2023, 5, 11)
+
+    # Default: an occurrence that began before `#begin` is dropped entirely,
+    # although the vdate is `on?` for the rest of it
+    VirtualDate::Scheduler.new([vdate]).build(from, to).should be_empty
+    vdate.on?(Time.utc(2023, 5, 10, 11, 0)).should be_true
+
+    vdate.clamp_to_begin = true
+    scheduled = VirtualDate::Scheduler.new([vdate]).build(from, to)
+    scheduled.size.should eq 1
+    scheduled.first.start.should eq Time.utc(2023, 5, 10, 10, 30)
+
+    # A begin past the window schedules nothing either way
+    vdate.begin = Time.utc(2023, 5, 12)
+    VirtualDate::Scheduler.new([vdate]).build(from, to).should be_empty
+
+    # And an always-on vdate (no due rules) starts at its begin, not at `from`
+    always = VirtualDate.new("always")
+    always.begin = Time.utc(2023, 5, 10, 6, 0)
+    always.clamp_to_begin = true
+    starts = VirtualDate::Scheduler.new([always]).build(from, to)
+    starts.size.should eq 1
+    starts.first.start.should eq Time.utc(2023, 5, 10, 6, 0)
+  end
+
+  it "raises when a vdate depends on one not being scheduled" do
+    outside = VirtualDate.new("outside")
+    dependent = VirtualDate.new("dependent")
+    dependent.depends_on << outside
+
+    scheduler = VirtualDate::Scheduler.new([dependent])
+    expect_raises(ArgumentError, /not among the vdates being scheduled/) do
+      scheduler.build(Time.utc(2023, 5, 10), Time.utc(2023, 5, 11))
+    end
+  end
+
+  it "re-places every displaced occurrence, not a guard-limited prefix" do
+    # 120 hourly occurrences of "a-movable" are placed first, then the
+    # dependency-delayed higher-priority vdate displaces all of them; every
+    # one is individually re-placeable right after it. A guard sized by vdate
+    # count (formerly vdates*8 + 64 = 88) silently dropped the rest.
+    hourly = VirtualTime.new(minute: 0)
+
+    movable = VirtualDate.new("a-movable")
+    movable.due << hourly
+    movable.duration = 15.minutes
+    movable.flags << "g"
+
+    # Pinned to a single instant: the dependency floor is taken from the
+    # dependency's last scheduled occurrence, so a daily gate would push all
+    # of "strong"'s earlier candidates onto its final day
+    gate = VirtualDate.new("z-gate")
+    gate.due << VirtualTime.new(year: 2023, month: 5, day: 10, hour: 0, minute: 0)
+
+    strong = VirtualDate.new("strong")
+    strong.due << hourly
+    strong.duration = 20.minutes
+    strong.priority = 5
+    strong.flags << "g"
+    strong.depends_on << gate
+
+    from = Time.utc(2023, 5, 10)
+    to = from + 5.days
+    scheduled = VirtualDate::Scheduler.new([gate, movable, strong]).build(from, to)
+
+    strong_count = scheduled.count { |item| item.vdate.id == "strong" }
+    movable_count = scheduled.count { |item| item.vdate.id == "a-movable" }
+    strong_count.should eq 120
+    movable_count.should eq strong_count # every displaced occurrence re-placed at :20
+  end
+
+  it "holds max_shift as a total bound across displacement and re-placement" do
+    # "bb" is due at 10:00 but shifts to 10:30 behind a fixed block (30 min
+    # used of its 60-min max_shift). "aa" then displaces it from 10:30; the
+    # only slot after re-placement would be 11:15 -- 75 min from its due time
+    # -- so with max_shift measured from the original start, "bb" must be
+    # dropped, not scheduled beyond its documented total bound.
+    block = VirtualDate.new("block")
+    block.due << VirtualTime.new(hour: 10, minute: 0)
+    block.duration = 30.minutes
+    block.fixed = true
+    block.flags << "g"
+
+    bb = VirtualDate.new("bb")
+    bb.due << VirtualTime.new(hour: 10, minute: 0)
+    bb.duration = 30.minutes
+    bb.priority = 1
+    bb.max_shift = 60.minutes
+    bb.flags << "g"
+
+    gate = VirtualDate.new("z-gate")
+    gate.due << VirtualTime.new(hour: 9, minute: 0)
+
+    aa = VirtualDate.new("aa")
+    aa.due << VirtualTime.new(hour: 10, minute: 30)
+    aa.duration = 45.minutes
+    aa.priority = 5
+    aa.flags << "g"
+    aa.depends_on << gate
+
+    scheduled = VirtualDate::Scheduler.new([block, bb, gate, aa])
+      .build(Time.utc(2023, 5, 10), Time.utc(2023, 5, 11))
+
+    scheduled.find { |item| item.vdate.id == "bb" }.should be_nil
+    scheduled.find! { |item| item.vdate.id == "aa" }.start.should eq Time.utc(2023, 5, 10, 10, 30)
+  end
+
+  it "reports the document position for an invalid begin/end rule value" do
+    yaml = <<-YAML
+      schema_version: 2
+      vdates:
+      - id: a
+        begin: "month: banana"
+      YAML
+
+    error = expect_raises(YAML::ParseException, /Expected an RFC 3339 time or a VirtualTime rule/) do
+      VirtualDate::VirtualDateFile.load yaml
+    end
+    error.message.to_s.should match /line \d+/i
+  end
+
+  it "re-places a vdate displaced by a fixed one" do
+    at_ten = VirtualTime.new(hour: 10, minute: 0)
+
+    # Fixed vdates jump the ready queue, so to reach the displacement branch
+    # the fixed one is gated behind a dependency that sorts (and so is placed)
+    # only after the movable one -- ids pick the processing order
+    movable = VirtualDate.new("a-movable")
+    movable.due << at_ten
+    movable.duration = 30.minutes
+    movable.flags << "meeting"
+
+    gate = VirtualDate.new("z-gate")
+    gate.due << at_ten
+
+    fixed = VirtualDate.new("fixed")
+    fixed.due << at_ten
+    fixed.duration = 30.minutes
+    fixed.fixed = true
+    fixed.flags << "meeting"
+    fixed.depends_on << gate
+
+    scheduled = VirtualDate::Scheduler.new([gate, movable, fixed])
+      .build(Time.utc(2023, 5, 10), Time.utc(2023, 5, 11))
+
+    # All three survive: the fixed one takes 10:00 by displacing the movable,
+    # and the displaced one is re-placed right after it instead of vanishing
+    scheduled.map(&.vdate.id).sort!.should eq ["a-movable", "fixed", "z-gate"]
+    holder = scheduled.find! { |item| item.vdate.id == "fixed" }
+    mover = scheduled.find! { |item| item.vdate.id == "a-movable" }
+    holder.start.should eq Time.utc(2023, 5, 10, 10, 0)
+    mover.start.should eq holder.finish
+    mover.explanation.lines.any?(&.includes?("re-placement")).should be_true
+  end
+
+  it "rejects unknown vdate keys with their position" do
+    yaml = <<-YAML
+      schema_version: 2
+      vdates:
+      - id: a
+        durration: 5
+      YAML
+
+    error = expect_raises(ArgumentError, /Unknown key 'durration'/) do
+      VirtualDate::VirtualDateFile.load yaml
+    end
+    error.message.to_s.should match /Line \d+, column \d+/
+
+    # Every key the serializer writes must pass the allowed-key check
+    vdate = VirtualDate.new("full")
+    vdate.due << VirtualTime.new(hour: 10)
+    vdate.omit << VirtualTime.new(day_of_week: [6, 7])
+    vdate.begin = Time.utc(2023, 1, 1)
+    vdate.end = Time.utc(2024, 1, 1)
+    vdate.shift = 1.hour
+    vdate.max_shift = 3.hours
+    vdate.on = false
+    vdate.duration = 30.minutes
+    vdate.flags << "x"
+    vdate.stagger = 5.minutes
+    vdate.deadline = Time.utc(2023, 12, 31)
+    vdate.clamp_to_begin = true
+    other = VirtualDate.new("other")
+    vdate.depends_on << other
+
+    file_yaml = {"schema_version" => VirtualDate::Migrator::CURRENT_VERSION, "vdates" => [vdate, other]}.to_yaml
+    VirtualDate::VirtualDateFile.load(file_yaml).size.should eq 2
+  end
+
+  it "answers rather than raising for shifts too large for span arithmetic" do
+    # Regression: `on?`'s inverse search derived its implicit bound as
+    # `step.abs * max_shifts`, which overflows Int64 for spans over
+    # ~6.1e15 seconds at the default max_shifts, and OverflowError escaped
+    # from a method declared to return Bool
+    vdate = VirtualDate.new("big")
+    vdate.omit << VirtualTime.new(minute: 0..59)
+    vdate.shift = Time::Span.new(seconds: 7_000_000_000_000_000)
+
+    vdate.strict_on?(Time.utc(2023, 1, 1)).should be_false
+    vdate.resolve(Time.utc(2023, 1, 1)).should be_false
+    vdate.on?(Time.utc(2023, 1, 1)).should be_false
+
+    # And the extreme of the type: `Time + Span::MAX` overflows in Int64
+    # arithmetic before Time's own range check can raise the rescued
+    # ArgumentError
+    vdate.shift = Time::Span::MAX
+    vdate.strict_on?(Time.utc(2023, 1, 1)).should be_false
+    vdate.on?(Time.utc(2023, 1, 1)).should be_false
+  end
+
   it "reads back the extreme spans it writes" do
     # Regression: the sign was stripped before parsing and re-applied by
     # negating the finished span, and `Int64::MIN` -- what `Time::Span::MIN`
@@ -2690,14 +2906,17 @@ describe "VirtualDate – advanced scheduling" do
     vdate.due << VirtualTime.new(hour: 8)
     vdate.depends_on << dependency
 
-    # A scheduler that does not know about the dependency: "b" simply cannot
-    # be placed, both before and after the schedule is written out
+    # A scheduler that does not know about the dependency refuses to build --
+    # identically before and after the vdate is written out. (The historical
+    # bug made `#to_yaml` assign `#depends_on_ids`, which changed the error
+    # the next build raised.)
     scheduler = VirtualDate::Scheduler.new([vdate])
     from, to = Time.local(2023, 5, 10), Time.local(2023, 5, 11)
 
-    scheduler.build(from, to).should be_empty
+    before = expect_raises(ArgumentError) { scheduler.build(from, to) }
     vdate.to_yaml
-    scheduler.build(from, to).should be_empty
+    after = expect_raises(ArgumentError) { scheduler.build(from, to) }
+    after.message.should eq before.message
   end
 
   it "loads a schema_version document via VirtualDateFile.load" do
@@ -2897,10 +3116,12 @@ describe "VirtualDate – advanced scheduling" do
       scheduler = VirtualDate::Scheduler.new([a, z, w, c])
       scheduled = scheduler.build(Time.local(2023, 5, 10), Time.local(2023, 5, 11))
 
-      # "w" is displaced by the higher-priority "c"; "a" survives untouched
-      scheduled.map(&.vdate.id).sort!.should eq ["a", "c", "z"]
+      # "w" is displaced by the higher-priority "c" and re-placed after it;
+      # "a" survives untouched at its own slot
+      scheduled.map(&.vdate.id).sort!.should eq ["a", "c", "w", "z"]
       scheduled.find! { |item| item.vdate.id == "a" }.start.should eq Time.local(2023, 5, 10, 10, 0)
       scheduled.find! { |item| item.vdate.id == "c" }.start.should eq Time.local(2023, 5, 10, 10, 0)
+      scheduled.find! { |item| item.vdate.id == "w" }.start.should eq Time.local(2023, 5, 10, 11, 0)
     end
 
     it "does not let priority displace a vdate that others depend on" do
