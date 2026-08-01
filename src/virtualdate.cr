@@ -105,12 +105,16 @@ class VirtualDate
     return true if direct == true
     return false if direct == false
 
-    # 2. Only Time::Span shifts can produce inverse reachability.
-    #    An `#on` override of a span displaces the vdate in place of the
-    #    omit-driven `#shift` policy, so that is the step to search back along;
-    #    consulting `#shift` alone would report a vdate as never on even at the
-    #    very time `#resolve` says it lands on.
-    shift = @on.as?(Time::Span) || @shift
+    # 2. An `#on` override settles every time alike, so when it is a span every
+    #    instant is reachable: the base one span earlier resolves exactly onto
+    #    it. `#max_shift`/`#max_shifts` bound omit-driven rescheduling and have
+    #    no say over an override, which `#strict_on?` returns before consulting
+    #    anything else -- applying them only here would make `#on?` disagree
+    #    with the time `#resolve` reports.
+    return true if @on.is_a?(Time::Span)
+
+    # 3. Otherwise only a Time::Span shift can produce inverse reachability
+    shift = @shift
     return false unless shift.is_a?(Time::Span)
     return false if shift.total_nanoseconds == 0
 
@@ -152,7 +156,9 @@ class VirtualDate
     a.try do |a_val|
       case a_val
       when Time
-        return if a_val > instant_of(time, hint)
+        at = instant_of time, hint
+        return unless at
+        return if a_val > at
       else
         return unless a_val.matches?(time)
       end
@@ -161,7 +167,9 @@ class VirtualDate
     z.try do |z_val|
       case z_val
       when Time
-        return if z_val < instant_of(time, hint)
+        at = instant_of time, hint
+        return unless at
+        return if z_val < at
       else
         return unless z_val.matches?(time)
       end
@@ -169,7 +177,10 @@ class VirtualDate
 
     # Convert VirtualTime input to Time for downstream work.
     if time.is_a?(VirtualTime)
-      time = time.to_time(hint)
+      resolved = instant_of time, hint
+      return unless resolved
+
+      time = resolved
     end
 
     yes = due_on?(time)
@@ -190,11 +201,45 @@ class VirtualDate
       return false if s.total_nanoseconds == 0
       # (A log entry could be written about this.)
       return false if shifts_exhausted? max_shifts
-      delta = unwrap_shift_result VirtualTime::Search.shift_from_base(time, s, max_shift: max_shift, max_shifts: max_shifts) { |candidate| omit_on?(candidate) == true }
+      # The search is confined to the vdate's own bounds. Without that it walks
+      # straight past them, and a vdate whose `#end` says it is "never on after"
+      # a date resolves to a time beyond it.
+      delta = unwrap_shift_result VirtualTime::Search.shift_from_base(
+        time, s,
+        domain: Bounds.new(self),
+        max_shift: max_shift,
+        max_shifts: max_shifts
+      ) { |candidate| omit_on?(candidate) == true }
       return delta || false
     end
 
     nil
+  end
+
+  # Returns whether `time` falls within `#begin` and `#end`.
+  #
+  # A bound that is a `VirtualTime` is matched as a pattern rather than used as
+  # an ordering bound, the way `#strict_on?` treats it.
+  def within_bounds?(time : Time) : Bool
+    if a = @begin
+      return false unless a.is_a?(Time) ? a <= time : a.matches?(time)
+    end
+
+    if z = @end
+      return false unless z.is_a?(Time) ? z >= time : z.matches?(time)
+    end
+
+    true
+  end
+
+  # Confines an omit-driven shift search to one vdate's `#begin`/`#end` bounds.
+  private struct Bounds < VirtualTime::Domain
+    def initialize(@vdate : VirtualDate)
+    end
+
+    def contains?(time : Time) : Bool
+      @vdate.within_bounds? time
+    end
   end
 
   # Returns whether any of the vdate's `#due` rules is on at `time`.
@@ -301,8 +346,13 @@ class VirtualDate
   # `VirtualTime` for June 1 asked of a vdate beginning on May 10 would come
   # back "not applicable", while the identical `Time` came back "on".
   @[AlwaysInline]
-  private def instant_of(time : VirtualTime::TimeOrVirtualTime, hint) : Time
+  private def instant_of(time : VirtualTime::TimeOrVirtualTime, hint) : Time?
     time.is_a?(Time) ? time : time.to_time(hint)
+  rescue ArgumentError
+    # A pattern naming no real time -- the 30th of February -- has no instant
+    # to compare a bound against. Every `#matches?`-based predicate beside this
+    # one lets such a pattern simply never match, rather than raising.
+    nil
   end
 
   # A simple, deterministic scheduler for VirtualDate vdates.
@@ -346,10 +396,18 @@ class VirtualDate
     # A negative duration in particular has consequences beyond the vdate
     # itself: it finishes before it starts, which switches off overlap
     # detection, so other vdates are then free to take a slot it holds.
+    # Longest duration a vdate can carry: any more and adding it to a start
+    # runs off the end of the calendar `Time` can hold.
+    MAX_DURATION = Time.utc(9999, 12, 31) - Time.utc(1, 1, 1)
+
     private def validate_vdates!
       @vdates.each do |vdate|
         if vdate.duration < Time::Span.zero
           raise ArgumentError.new("duration of vdate '#{vdate.id}' must be >= 0")
+        end
+
+        if vdate.duration > MAX_DURATION
+          raise ArgumentError.new("duration of vdate '#{vdate.id}' is longer than the calendar")
         end
 
         if vdate.parallel < 1
@@ -503,31 +561,86 @@ class VirtualDate
     # day per month) are found without scanning the window minute by minute.
     #
     # Times that match contiguously at `granularity` spacing coalesce into a single
-    # occurrence starting at the first matching time.
+    # occurrence starting at the first matching time, across the due rules taken
+    # together: the rules are OR-ed, so "10:00-10:29" beside "10:30-10:59" is one
+    # continuous block and not two.
     private def occurrence_starts(vdate : VirtualDate, from : Time, to : Time, granularity : Time::Span, max_candidates : Int32) : Array(Time)
       # No due rules means the vdate is always on; a single candidate at window start
       return [from] if vdate.due.empty?
 
-      starts = [] of Time
+      # Each rule is scanned for the runs of contiguous matching time it covers,
+      # as `{first, last}` pairs, and the runs of all of them are merged. A
+      # rule that runs out of budget leaves its own answer complete only up to
+      # the last run it emitted, so the merged answer is trusted only below the
+      # earliest such point -- and the budget is raised until that reaches as
+      # far as the caller asked for. Capping each rule and merging regardless
+      # would drop occurrences that come *before* ones it kept, which is not
+      # what a limit does.
+      # One more than asked for: a rule that spends its budget leaves its own
+      # last run out of the trusted set, so a budget of exactly
+      # `max_candidates` could never fill it and the scan always ran twice.
+      budget = max_candidates == Int32::MAX ? max_candidates : max_candidates + 1
+
+      loop do
+        runs, cut = scan_due_rules vdate, from, to, granularity, budget
+        starts = merge_runs(runs.reject { |(start, _)| start >= cut }, granularity)
+
+        return starts.first(max_candidates) if cut == to || starts.size >= max_candidates || budget >= MAX_RULE_ITERATIONS
+
+        budget *= 2
+      end
+    end
+
+    # Scans every due rule for its runs, and returns them together with the
+    # point below which the collected set is complete -- `to` when every rule
+    # was scanned to the end of the window.
+    # ameba:disable Metrics/CyclomaticComplexity
+    private def scan_due_rules(vdate : VirtualDate, from : Time, to : Time, granularity : Time::Span, budget : Int32) : Tuple(Array(Tuple(Time, Time)), Time)
+      runs = [] of Tuple(Time, Time)
+      cut = to
 
       vdate.due.each do |vtime|
+        head = first_occurrence vtime, from
+        next unless head && head < to
+
+        # Stepped from just before the head, so that the head itself is the
+        # first thing yielded. The first instant the calendar holds has nothing
+        # before it, and there the head is handed over by hand instead.
+        pending_head = false
         iter =
           begin
-            vtime.step(granularity, from: from - 1.nanosecond)
+            vtime.step(granularity, from: head - 1.nanosecond)
           rescue ArgumentError
-            # Rule cannot materialize at all (e.g. unsatisfiable constraints)
-            next
+            pending_head = true
+
+            begin
+              vtime.step(granularity, from: head)
+            rescue ArgumentError
+              next
+            end
           end
 
         iterations = 0
         prev = nil
+        run_start = nil
+        run_finish = nil
+        run_open = false
+        rule_runs = 0
+        last_start = nil
+        # Where the next run may first begin. A stride past the last match seen
+        # is that point; anything nearer would have merged.
+        floor = from
 
         loop do
-          t = iter.next
-          break unless t.is_a?(Time)
-          # Rule only materializes into the past; not satisfiable in this window
-          break if t < from
-          break if t >= to
+          if pending_head
+            pending_head = false
+            t = head
+          else
+            yielded = iter.next
+            break unless yielded.is_a?(Time)
+
+            t = yielded
+          end
           # Iterator not advancing (fully-fixed rule reached its only match)
           break if prev && t <= prev
 
@@ -536,17 +649,454 @@ class VirtualDate
             raise ArgumentError.new("Occurrence scan exceeded #{MAX_RULE_ITERATIONS} steps for a due rule of vdate '#{vdate.id}'; use a coarser granularity or a narrower window")
           end
 
-          if prev.nil? || (t - prev) > granularity
-            starts << t
-          end
           prev = t
 
-          break if starts.size >= max_candidates
+          # A run reaches as far as its matching stretches carry it, so what
+          # decides whether the scan is still inside one is the distance from
+          # its end -- not from the last time the scan happened to land on.
+          # An end the walk only got part way to says nothing about where the
+          # run stops, so it is carried on as far as `t` before being read.
+          while (opened = run_start) && (finish = run_finish) && run_open && finish < t
+            finish, run_open = run_end vtime, finish, granularity, to
+            run_finish = finish
+            # Recorded here rather than only where the run goes on to absorb
+            # `t`: a carry the scan then walks away from is still the run's
+            # end, and leaving the stale one standing puts a gap in front of
+            # the next occurrence that the rules do not have.
+            runs[-1] = {opened, finish}
+          end
+
+          if (finish = run_finish) && (opened = run_start) && (t - finish) <= granularity
+            if t > finish
+              finish, run_open = run_end vtime, t, granularity, to
+              run_finish = finish
+            end
+            runs[-1] = {opened, finish}
+          else
+            # A new run. Its start is the first matching time the scan could
+            # have reached, which the stride can overshoot exactly as it could
+            # the head -- and by an amount that depends on where the caller
+            # began looking. A stride past the last match seen is where the
+            # next run can first begin; anything nearer would have merged.
+            start = first_occurrence(vtime, floor) || t
+            start = t if start > t
+
+            break if start >= to
+
+            run_start = start
+            ending, run_open = run_end vtime, start, granularity, to
+            runs << {start, ending}
+            rule_runs += 1
+            last_start = start
+
+            # The search can reach back past the stride's own yield, and the
+            # run it opens there need not reach as far as `t`. What the scan
+            # landed on is a match of its own and begins a second run rather
+            # than being dropped.
+            if (t - ending) > granularity
+              run_start = t
+              ending, run_open = run_end vtime, t, granularity, to
+              runs << {t, ending}
+              rule_runs += 1
+              last_start = t
+            end
+
+            run_finish = ending
+          end
+
+          break if t >= to
+
+          if rule_runs >= budget
+            # Out of budget: everything this rule has to say below its last run
+            # is known, nothing above it is.
+            cut = last_start if last_start && last_start < cut
+            break
+          end
+
+          # Once a run's end is settled there is nothing left to learn by
+          # striding through the rest of it -- the next run cannot begin until
+          # more than `granularity` past that end, so the scan resumes from
+          # there. Walking it instead costs a stride per matching minute, and a
+          # rule as ordinary as office hours over a year exhausts
+          # `MAX_RULE_ITERATIONS` long before it runs out of occurrences.
+          if (settled = run_finish) && !run_open
+            break if settled >= to
+
+            iter = begin
+              floor = settled + granularity + 1.nanosecond
+              break if floor >= to
+
+              vtime.step(granularity, from: settled + granularity)
+            rescue ArgumentError
+              # Off the end of the calendar, which is past the window either way
+              break
+            end
+
+            prev = nil
+            run_start = nil
+            run_finish = nil
+          else
+            floor = t + granularity
+          end
         end
       end
 
-      starts.uniq!.sort!
-      starts.first(max_candidates)
+      {runs, cut}
+    end
+
+    # How many times `#first_occurrence` re-asks with a more canonical hint
+    # before settling. Two rounds cover the shapes that arise; the third only
+    # confirms that nothing moved.
+    MAX_SEED_REFINEMENTS = 3
+
+    # Returns the first time at or after `from` that `vtime` matches, or nil if
+    # it never does.
+    #
+    # `VirtualTime` fills a rule's unconstrained fields from the hint it is
+    # handed, so materializing straight from `from` overshoots: a rule naming
+    # only a month, asked from the 28th, lands on the 28th of that month rather
+    # than its 1st, and the occurrences a vdate has would depend on when the
+    # caller happened to start looking. The answer is refined by re-asking from
+    # the start of the unit it fell in -- minute, hour, day, month, year --
+    # keeping whichever lands earliest while still being at or after `from`.
+    private def first_occurrence(vtime : VirtualTime, from : Time) : Time?
+      best = materialize_at vtime, from
+      return nil unless best
+
+      MAX_SEED_REFINEMENTS.times do
+        improved = false
+
+        # Seeds are taken from the unit boundaries around `from` as well as
+        # around the answer so far. Only the latter would leave a rule whose
+        # first pass overshot into a later month with no way back: the seed
+        # that would have found the earlier month lies behind the overshoot.
+        (unit_starts(from) + unit_starts(best)).each do |seed|
+          candidate = materialize_at vtime, seed
+          next unless candidate && from <= candidate < best
+
+          best = candidate
+          improved = true
+        end
+
+        break unless improved
+      end
+
+      best
+    end
+
+    # Furthest the run walk follows matching stretches in one call. A walk that
+    # stops here says so, and the caller resumes it from where it left off, so
+    # the work over a whole run stays proportional to the stretches in it.
+    MAX_RUN_STEPS = 512
+
+    # Returns the last instant of the run of matching time that `at` belongs
+    # to: the end of its own matching stretch, carried on over any further
+    # stretches that each begin within `granularity` of the last. The second
+    # element of the pair says whether the walk gave up with the run still
+    # going, in which case the first is a lower bound and not the end.
+    #
+    # The scan strides by `granularity` and yields only the matches it lands
+    # on, so it sees neither where a matching stretch ends nor the ones lying
+    # between its yields. Both have to be worked out from the rule itself, or a
+    # rule matching every third minute scanned at five -- which yields every
+    # sixth -- would look like a series of separate occurrences.
+    #
+    # Nothing past `limit` is of interest: every run starts before it, so an end
+    # that reaches it already covers whatever else there is to merge with.
+    private def run_end(vtime : VirtualTime, at : Time, granularity : Time::Span, limit : Time) : Tuple(Time, Bool)
+      ending = match_block_end vtime, at
+
+      MAX_RUN_STEPS.times do
+        return {ending, false} if ending >= limit
+
+        resumes = materialize_at vtime, ending + 1.nanosecond
+        return {ending, false} unless resumes
+
+        # A rule's unconstrained fields are filled from the hint it is handed,
+        # and where a transition has cut the stretch short that hint carries
+        # the transition's own clock -- so the answer lands past the start of
+        # the stretch resuming on the far side, and the run reads as beginning
+        # in its own middle. Refining costs a good many materializations, so it
+        # is done only where a transition really does lie between the two.
+        if resumes.offset != ending.offset
+          refined = first_occurrence vtime, ending + 1.nanosecond
+          resumes = refined if refined
+        end
+
+        return {ending, false} if (resumes - ending) > granularity
+
+        moved = match_block_end vtime, resumes
+        return {ending, false} if moved <= ending
+
+        ending = moved
+      end
+
+      {ending, true}
+    end
+
+    # Returns the last instant of the stretch of matching time that `at`
+    # belongs to.
+    #
+    # A rule matches continuously for as long as its finest constrained field
+    # holds: `minute: 6` matches every instant of that minute, `hour: 20` every
+    # instant of that hour. Where nothing finer than the date is named, the
+    # stretch runs to the end of the day.
+    private def match_block_end(vtime : VirtualTime, at : Time, depth : Int32 = 0) : Time # ameba:disable Metrics/CyclomaticComplexity
+      last =
+        if constrains?(vtime.nanosecond, 1_000_000_000)
+          # Both name an offset within the same second rather than one nested
+          # in the other, so a stretch runs only as far as the two agree
+          nanos = contiguous_last vtime.nanosecond, at.nanosecond, 1_000_000_000
+          if constrains? vtime.millisecond, 1_000
+            within_ms = (contiguous_last(vtime.millisecond, at.nanosecond // 1_000_000, 1_000) + 1) * 1_000_000 - 1
+            nanos = within_ms if within_ms < nanos
+          end
+          {at.hour, at.minute, at.second, nanos}
+        elsif constrains?(vtime.millisecond, 1_000)
+          {at.hour, at.minute, at.second,
+           (contiguous_last(vtime.millisecond, at.nanosecond // 1_000_000, 1_000) + 1) * 1_000_000 - 1}
+        elsif constrains?(vtime.second, 60)
+          {at.hour, at.minute, contiguous_last(vtime.second, at.second, 60), 999_999_999}
+        elsif constrains?(vtime.minute, 60)
+          {at.hour, contiguous_last(vtime.minute, at.minute, 60), 59, 999_999_999}
+        elsif constrains?(vtime.hour, 24)
+          {contiguous_last(vtime.hour, at.hour, 24), 59, 59, 999_999_999}
+        else
+          {23, 59, 59, 999_999_999}
+        end
+
+      # How far the stretch reaches is a question about wall clocks, but the
+      # answer has to be an instant -- so the wall-clock distance is measured
+      # naively and added on. Where no transition falls inside, the two agree
+      # and the offset comes out unchanged; a rebuild through `Time.local`
+      # would instead have to guess which side of a fold to land on, and for a
+      # clock a gap swallowed it can land before `at` altogether.
+      span = Time.utc(at.year, at.month, at.day, last[0], last[1], last[2], nanosecond: last[3]) -
+             Time.utc(at.year, at.month, at.day, at.hour, at.minute, at.second, nanosecond: at.nanosecond)
+      return at if span <= Time::Span.zero
+
+      ending = at + span
+      return ending if ending.offset == at.offset || depth >= MAX_BLOCK_TRANSITIONS
+
+      # A transition falls inside. Whether the stretch carries on past it is
+      # settled by asking the rule about the clock on the far side: a
+      # fall-back that repeats matching time carries on, a gap that skips to a
+      # clock the rule refuses ends the stretch where the gap begins.
+      crossing = transition_between at, ending
+      return ending unless crossing
+
+      vtime.matches?(crossing) ? match_block_end(vtime, crossing, depth + 1) : crossing - 1.nanosecond
+    end
+
+    # Returns whether the two carry the same wall clock, whatever offset each
+    # reads it with.
+    private def same_wall_clock?(a : Time, b : Time) : Bool
+      a.year == b.year && a.month == b.month && a.day == b.day &&
+        a.hour == b.hour && a.minute == b.minute && a.second == b.second &&
+        a.nanosecond == b.nanosecond
+    end
+
+    # Furthest a single matching stretch is followed across UTC offset changes.
+    # Two is already more than any zone puts inside one.
+    MAX_BLOCK_TRANSITIONS = 3
+
+    # Returns the instant at which the UTC offset changes between the two, or
+    # nil when it does not. Searched down to the nanosecond, since the result
+    # becomes the boundary of a matching stretch.
+    private def transition_between(earlier : Time, later : Time) : Time?
+      return nil if earlier.offset == later.offset
+
+      low, high = earlier, later
+      while (high - low) > 1.nanosecond
+        middle = low + (high - low) / 2
+        break if middle == low || middle == high
+
+        if middle.offset == low.offset
+          low = middle
+        else
+          high = middle
+        end
+      end
+
+      high
+    end
+
+    # Returns the largest value at or above `from` that the field allows with
+    # every value between the two allowed as well.
+    #
+    # A rule matches continuously for as long as its finest constrained field
+    # keeps saying yes, and consecutive allowed values are one stretch, not one
+    # each: `nanosecond: 0..500_000_000` matches for half of every second, and
+    # counting that as five hundred million stretches is what turns a
+    # millisecond of window into half a second of work. Read from the bounds,
+    # never by walking them.
+    private def contiguous_last(value, from : Int32, size : Int32) : Int32 # ameba:disable Metrics/CyclomaticComplexity
+      case value
+      when Nil
+        size - 1
+      when Bool
+        value ? size - 1 : from
+      when Range(Int32, Int32)
+        return from if value.begin < 0 || value.end < 0
+
+        last = value.exclusive? ? value.end - 1 : value.end
+        last < from ? from : {last, size - 1}.min
+      when Array(Int32), Set(Int32)
+        return from if value.any?(&.<(0))
+
+        last = from
+        # `Array#to_a` hands back the array itself, so it is sorted as a copy --
+        # this is a query, and reordering the caller's own rule is not its place
+        value.to_a.sort.each { |allowed| last = allowed if allowed == last + 1 }
+        last
+      when Steppable::StepIterator(Int32, Int32, Int32)
+        return from unless value.step == 1 && value.current >= 0 && value.limit >= 0
+
+        last = value.exclusive ? value.limit - 1 : value.limit
+        last < from ? from : {last, size - 1}.min
+      else
+        from
+      end
+    end
+
+    # Returns whether `value` narrows a field at all.
+    #
+    # A rule letting every value of a field through matches for as long as the
+    # field above it does; counting it as a constraint would cut one continuous
+    # stretch into as many as the field has values -- a thousand per second for
+    # `millisecond: 0..999`, a billion for the nanoseconds under it -- and the
+    # run walk would then step through every one of them.
+    private def constrains?(value, size : Int32) : Bool
+      case value
+      when Nil
+        false
+      when Bool
+        # `true` lets everything through; `false` nothing, and a rule matching
+        # nothing has no stretch to measure either way
+        !value
+      when Range(Int32, Int32)
+        last = value.exclusive? ? value.end - 1 : value.end
+        !(value.begin <= 0 && last >= size - 1)
+      when Array(Int32), Set(Int32)
+        value.size < size || !(0...size).all? { |v| value.includes? v }
+      else
+        true
+      end
+    end
+
+    # Returns the first time at or after `hint` that `vtime` matches.
+    #
+    # `VirtualTime#succ` rather than `#to_time`, for the sake of the extra it
+    # does: a DST fall-back repeats a stretch of wall clock, and only `#succ`
+    # looks into the repeat -- materialization on its own meets each wall clock
+    # once and steps over the second occurrence.
+    private def materialize_at(vtime : VirtualTime, hint : Time) : Time?
+      # Asked from just before the hint, so that a match *at* it counts. The
+      # first instant the calendar holds has no such point, and there
+      # materializing from the hint itself answers the same question.
+      begin
+        return vtime.succ hint - 1.nanosecond
+      rescue ArgumentError
+        # Either the rule cannot be satisfied from here or there is nothing
+        # before the hint to ask from; the latter is worth a second look
+      end
+
+      at = vtime.to_time hint
+      at >= hint ? at : nil
+    rescue ArgumentError
+      # The rule cannot be satisfied from here
+      nil
+    end
+
+    # Returns the starts of the minute, hour, day, month and year `time` falls in.
+    private def unit_starts(time : Time) : Array(Time)
+      location = time.location
+
+      # The sub-minute boundaries are reached by instant arithmetic: nothing
+      # that short is rebuilt from a wall clock, so neither a gap nor a fold
+      # has any say over them. Without them a rule constraining `#second` or
+      # finer has no seed that reaches the start of its own matching stretch,
+      # and whatever fraction the floor happened to carry leaks into the
+      # answer -- an occurrence reported a fraction of a second late.
+      [
+        time - time.nanosecond.nanoseconds,
+        time - (time.nanosecond % 1_000_000).nanoseconds,
+      ] + [
+        unit_start(time.year, time.month, time.day, time.hour, time.minute, location),
+        unit_start(time.year, time.month, time.day, time.hour, 0, location),
+        unit_start(time.year, time.month, time.day, 0, 0, location),
+        unit_start(time.year, time.month, 1, 0, 0, location),
+        unit_start(time.year, 1, 1, 0, 0, location),
+      ].compact.flat_map { |seed| fold_twins seed }
+    end
+
+    # Returns every instant sharing `time`'s wall clock, `time` itself first.
+    #
+    # A DST fall-back gives one wall clock two instants and `Time.local`
+    # settles on one of them without saying which -- the earlier in
+    # America/New_York, the later in Europe/Zagreb. A seed built from
+    # wall-clock fields therefore lands in whichever pass the zone prefers, and
+    # when the search is in the other one the seed sits behind its floor and is
+    # thrown away, leaving the overshoot it was meant to correct standing.
+    # Offering both leaves the choice to the search.
+    private def fold_twins(time : Time) : Array(Time)
+      fold = (time - 2.hours).offset - (time + 2.hours).offset
+      return [time] unless fold > 0
+
+      twins = [time]
+      [time + fold.seconds, time - fold.seconds].each do |twin|
+        twins << twin if same_wall_clock? twin, time
+      end
+      twins
+    rescue ArgumentError
+      # Too near the end of the representable calendar to look either way
+      [time]
+    end
+
+    # Returns the first instant of the unit that begins on the given wall clock.
+    #
+    # A DST gap can swallow that wall clock outright -- midnight does not exist
+    # in Santiago on the day the clocks go forward -- and `Time.local` then
+    # hands back a neighbouring instant that reads as an *earlier* clock. Such a
+    # seed is worse than none: a rule's unconstrained fields are filled from the
+    # hint it is given, so a seed reading 23:00 of the previous day sends the
+    # search to 23:00 rather than to the start of the day it stands for. Where
+    # the wall clock is missing, the unit begins where the gap ends.
+    private def unit_start(year : Int32, month : Int32, day : Int32, hour : Int32, minute : Int32, location : Time::Location) : Time?
+      wanted = Time.local year, month, day, hour, minute, 0, location: location
+      return wanted if wanted.year == year && wanted.month == month && wanted.day == day &&
+                       wanted.hour == hour && wanted.minute == minute
+
+      skew = Time.utc(year, month, day, hour, minute, 0) -
+             Time.utc(wanted.year, wanted.month, wanted.day, wanted.hour, wanted.minute, wanted.second)
+      return unless skew > Time::Span.zero
+
+      wanted + skew
+    rescue ArgumentError
+      nil
+    end
+
+    # Returns the start of each run once overlapping and adjacent runs -- those
+    # no more than `granularity` apart -- have been merged into one.
+    private def merge_runs(runs : Array(Tuple(Time, Time)), granularity : Time::Span) : Array(Time)
+      return [] of Time if runs.empty?
+
+      runs.sort_by! &.[0]
+
+      starts = [] of Time
+      current_start, current_end = runs.first
+
+      runs.each do |(run_start, run_end)|
+        if (run_start - current_end) <= granularity
+          current_end = run_end if run_end > current_end
+        else
+          starts << current_start
+          current_start, current_end = run_start, run_end
+        end
+      end
+
+      starts << current_start
+      starts
     end
 
     # Finds earliest time a vdate can start, but not before its dependencies
@@ -577,6 +1127,7 @@ class VirtualDate
     # - Shift due to conflicts
     #
     # - Returns a bounded list of concrete Time values wrapped as objects
+    # ameba:disable Metrics/CyclomaticComplexity
     private def generate_candidates(vdate : VirtualDate, from : Time, to : Time, granularity : Time::Span, max_candidates : Int32) : Array(Candidate)
       candidates = [] of Candidate
       seen_starts = Set(Time).new
@@ -590,8 +1141,10 @@ class VirtualDate
           end
 
         next unless start
-        # The window is half-open, so a start of exactly `to` is outside it
-        next if start >= to
+        # The window is half-open, so a start of exactly `to` is outside it --
+        # and a negative shift can just as well carry an occurrence out the
+        # other side, before `from`
+        next if start < from || start >= to
         # Different bases can shift-resolve to the same start; schedule it once
         next unless seen_starts.add?(start)
 
@@ -601,8 +1154,13 @@ class VirtualDate
           vdate.parallel.times do |i|
             t = start + stagger * i
             break if t >= to
+            break if candidates.size >= max_candidates
 
-            next if vdate.omit_on?(t)
+            # The same two exemptions the placement guard makes: `shift = true`
+            # is the policy that keeps an omitted time, and a non-nil `#on`
+            # overrides omission outright. Turning `#stagger` on is not meant
+            # to decide whether an occurrence exists at all.
+            next if vdate.on.nil? && vdate.shift != true && vdate.omit_on?(t)
 
             candidate = Candidate.new(vdate, t)
             candidate.explanation.add("Initial staggered candidate ##{i + 1} at #{t} (stagger=#{stagger})")
@@ -643,6 +1201,38 @@ class VirtualDate
       max_shifts = vdate.max_shifts
       shifts = 0
 
+      # A `VirtualTime` deadline is resolved once, against the occurrence this
+      # candidate came from. Resolving it afresh at each shifted start would
+      # hand the vdate a new deadline every time it moved -- tomorrow's 17:00
+      # once it had slipped past today's -- so it could never miss one.
+      # A rule naming no real time -- the 30th of February -- cannot be
+      # materialized. Every other `VirtualTime`-valued field tolerates one of
+      # those by simply never matching, and a deadline that can never arrive is
+      # a deadline the vdate can never meet.
+      deadline_time =
+        case deadline = vdate.deadline
+        when Time
+          deadline
+        when VirtualTime
+          begin
+            deadline.to_time start
+          rescue ArgumentError
+            explanation.add "Rejected: deadline #{deadline} names no real time"
+            return nil
+          end
+        end
+
+      # Every step forward uses the vdate's own shift when it has a usable one.
+      # A zero or negative shift would never get past a conflict (looping for
+      # ever), so those fall back to the default step.
+      shift_span =
+        case s = vdate.shift
+        when Time::Span
+          s > Time::Span.zero ? s : 1.minute
+        else
+          1.minute
+        end
+
       loop do
         if start != previous_start
           previous_start = start
@@ -659,6 +1249,26 @@ class VirtualDate
           end
         end
 
+        # A start the scheduler picked itself -- moving past a conflict, or
+        # meeting a dependency floor -- must not land on a time the vdate is
+        # omitted from. `shift = true` is the one policy that says an omitted
+        # time is to be kept, and starts that came straight from `#resolve`
+        # have had the vdate's own omit policy applied already.
+        if vdate.on.nil? && vdate.shift != true && vdate.omit_on? start
+          explanation.add "Shifted on from omitted time #{start} to #{start + shift_span}"
+          start += shift_span
+          next
+        end
+
+        # Nor outside the vdate's own bounds. `#end` is documented as a time it
+        # is never on after, and moving forward can only take it further past
+        # one -- `#strict_on?` confines its own shift search for the same
+        # reason.
+        unless vdate.on.nil? ? vdate.within_bounds?(start) : true
+          explanation.add "Rejected: #{start} falls outside the vdate's begin/end bounds"
+          return nil
+        end
+
         # Two instances of one vdate at the very same start are one occurrence
         # counted twice, whatever `#parallel` allows for overlapping ones.
         # Several of them can converge here: occurrences before a dependency
@@ -669,33 +1279,31 @@ class VirtualDate
           return nil
         end
 
-        finish = start + duration
-
-        # Horizon guard
-        if finish > horizon
-          explanation.add("Rejected: finish #{finish} exceeds horizon #{horizon}")
+        # Horizon guard. The window is half-open, so a start of exactly the
+        # horizon is outside it -- which only a zero-duration vdate could
+        # otherwise slip through, its finish being no later than its start.
+        # Measuring the duration against the room left rather than adding it on
+        # first also keeps one that would run off the end of the calendar from
+        # raising where it should simply not fit.
+        if start >= horizon || duration > horizon - start
+          explanation.add("Rejected: #{start} plus a duration of #{duration} falls outside the window ending #{horizon}")
           return nil
         end
 
+        finish = start + duration
+
         scheduled = Scheduled.new(vdate, start, explanation)
 
-        if deadline = vdate.deadline
-          deadline_time =
-            case deadline
-            when Time
-              deadline
-            else
-              deadline.to_time(start)
-            end
-
+        if deadline_time
           if finish > deadline_time
             explanation.add "Rejected: finish #{finish} exceeds hard deadline #{deadline_time}"
             return nil
           end
         end
 
-        # Check parallelism / conflicts. A zero-duration vdate overlaps nothing,
-        # so it always lands here on the first pass.
+        # Check parallelism / conflicts. A zero-duration vdate overlaps nothing
+        # that starts at or after it, but it does overlap anything already under
+        # way, so it can be in conflict like any other.
         if acceptable_parallelism?(scheduled, scheduled_vdates)
           explanation.add "Scheduled at #{start}, no conflicts, parallelism OK"
           return scheduled
@@ -772,17 +1380,7 @@ class VirtualDate
           end
         end
 
-        # Equal priority or no decisive conflict → shift forward.
-        # A zero or negative shift would never advance past the conflict
-        # (looping forever), so those fall back to the default step.
-        shift_span =
-          case s = vdate.shift
-          when Time::Span
-            s > Time::Span.zero ? s : 1.minute
-          else
-            1.minute
-          end
-
+        # Equal priority or no decisive conflict → shift forward
         explanation.add("Conflict unresolved; shifted forward by #{shift_span} to #{start + shift_span}")
 
         start += shift_span
@@ -833,46 +1431,45 @@ class VirtualDate
 
     # Enforces per-vdate parallelism across overlapping scheduled_vdates sharing flags.
     #
-    # `parallel` states how much overlap a vdate itself tolerates, so a set of
-    # overlapping vdates is capped by the smallest limit among them: placing a
-    # `parallel: 2` vdate on top of an already-scheduled `parallel: 1` one would
-    # otherwise break the latter's constraint after the fact.
+    # `parallel` states how much overlap a vdate itself tolerates, so everyone
+    # the candidate would join has to stay within their own limit too, not just
+    # the candidate within its. Counting only the candidate's own overlaps
+    # misses the case where a third vdate overlaps two others that do not
+    # overlap each other: it passes that test while pushing the one in the
+    # middle over its limit.
     private def acceptable_parallelism?(candidate : Scheduled, scheduled_vdates : Array(Scheduled)) : Bool
-      c_start = candidate.start
-      c_end = candidate.finish
-      limit = candidate.vdate.parallel
-      flags = candidate.vdate.flags
+      return false unless within_parallel_limit? candidate, scheduled_vdates, candidate
 
-      # Vdates without flags all compete within one implicit default group
-      if flags.empty?
-        concurrent = 0
-
-        scheduled_vdates.each do |i|
-          next unless i.vdate.flags.empty?
-          next unless overlaps?(c_start, c_end, i.start, i.finish)
-
-          concurrent += 1
-          limit = i.vdate.parallel if i.vdate.parallel < limit
-        end
-
-        return concurrent + 1 <= limit
-      end
-
-      flags.each do |flag|
-        concurrent = 0
-        flag_limit = limit
-
-        scheduled_vdates.each do |i|
-          next unless i.vdate.flags.includes? flag
-          next unless overlaps?(c_start, c_end, i.start, i.finish)
-
-          concurrent += 1
-          flag_limit = i.vdate.parallel if i.vdate.parallel < flag_limit
-          return false if concurrent + 1 > flag_limit
-        end
+      scheduled_vdates.each do |other|
+        next unless overlaps?(candidate.start, candidate.finish, other.start, other.finish)
+        next unless shares_flag_group?(candidate.vdate, other.vdate)
+        return false unless within_parallel_limit? other, scheduled_vdates, candidate
       end
 
       true
+    end
+
+    # Returns whether `subject` stays within its own `#parallel` limit once
+    # `candidate` joins `scheduled_vdates`.
+    #
+    # `#parallel` counts the vdates sharing *any* flag with this one, the same
+    # union `#shares_flag_group?` uses to spot a conflict -- counting each flag
+    # separately would let a vdate with two flags overlap its limit once over
+    # in each of them.
+    private def within_parallel_limit?(subject : Scheduled, scheduled_vdates : Array(Scheduled), candidate : Scheduled) : Bool
+      concurrent = 0
+      scheduled_vdates.each { |other| concurrent += 1 if competes?(subject, other) }
+      concurrent += 1 if competes?(subject, candidate)
+
+      concurrent + 1 <= subject.vdate.parallel
+    end
+
+    @[AlwaysInline]
+    private def competes?(subject : Scheduled, other : Scheduled) : Bool
+      return false if other.same? subject
+      return false unless shares_flag_group? subject.vdate, other.vdate
+
+      overlaps? subject.start, subject.finish, other.start, other.finish
     end
 
     # Ensure there are no depdendency cycles or raise.
@@ -943,27 +1540,38 @@ class VirtualDate
   # This is a reference type on purpose: a `Candidate` hands its buffer to the
   # `Scheduled` it turns into, and both go on appending to the same buffer.
   class Explanation
-    # Maximum number of messages kept. Once reached, a final overflow notice is
-    # appended and all further messages are dropped.
+    # Maximum number of messages kept. Once reached, the penultimate line gives
+    # way to a notice of how many were dropped.
     MAX_LINES = 100
 
     property lines : Array(String)
+
+    # How many messages have been dropped for want of room
+    getter dropped = 0
 
     def initialize
       @lines = [] of String
     end
 
-    # Appends `msg`, and returns whether it (and any further message) was kept.
+    # Appends `msg`, and returns whether the buffer still had room for it.
+    #
+    # Once it is full the most recent message is kept in place of the previous
+    # one, rather than dropped: the last thing said about a candidate is its
+    # verdict, and for a vdate scheduled over a conflict because dependents
+    # require it, that line is the only thing telling a deliberate
+    # over-subscription apart from a scheduling fault.
     def add(msg : String) : Bool
-      return false if @lines.size >= MAX_LINES
-
-      @lines << msg
-
-      if @lines.size == MAX_LINES
-        @lines[-1] = "Explanation buffer overflow (limit: #{MAX_LINES} messages)"
+      if @lines.size >= MAX_LINES
+        # The first overflow costs two real messages: the one this replaces,
+        # and the one whose slot the notice takes. Later ones cost only the
+        # former, the notice being in place by then.
+        @dropped += @dropped.zero? ? 2 : 1
+        @lines[-2] = "... #{@dropped} message(s) dropped (limit: #{MAX_LINES})"
+        @lines[-1] = msg
         return false
       end
 
+      @lines << msg
       true
     end
 
@@ -1127,11 +1735,17 @@ class VirtualDate
       keys
     end
 
+    # ameba:disable Metrics/CyclomaticComplexity
     private def self.validate_vdates(
       seq : YAML::Nodes::Sequence,
       errors : Array(YamlError),
     )
-      seq.nodes.each do |vdate_node|
+      seq.nodes.each do |node|
+        # A YAML alias stands for the node it was anchored to -- which is what
+        # `#to_yaml` emits for a vdate that appears twice, and what a
+        # hand-written document uses to share one definition
+        vdate_node = node.is_a?(YAML::Nodes::Alias) ? (node.value || node) : node
+
         unless vdate_node.is_a?(YAML::Nodes::Mapping)
           errors << YamlError.new("Each vdate must be a mapping", vdate_node)
           next
@@ -1180,6 +1794,11 @@ class VirtualDate
     @depends_on = @depends_on_ids.compact_map do |id|
       index[id]? || raise ArgumentError.new("Unknown dependency '#{id}'")
     end
+
+    # From here on the object graph is the one source of truth. Ids left behind
+    # would put back a dependency taken out of `#depends_on` -- on the next
+    # resolve, and on save, where they are the fallback.
+    @depends_on_ids.clear
   end
 
   # `YAML::Serializable` tests a converter-backed property for truthiness
@@ -1266,11 +1885,17 @@ class VirtualDate
     # Returns `value` rendered as a (possibly fractional) number of seconds.
     def self.to_scalar(value : Time::Span) : String
       nanoseconds = value.nanoseconds
-      return value.to_i.to_s if nanoseconds == 0
+      seconds = value.to_i
+      return seconds.to_s if nanoseconds == 0
 
-      sign = value < Time::Span.zero ? "-" : ""
+      # The whole part is rendered as it stands rather than as a sign plus its
+      # magnitude: `Int64::MIN` -- the seconds of `Time::Span::MIN` -- has no
+      # positive counterpart, and asking for one overflows. Only the "-0.5"
+      # shape needs the sign put back by hand.
+      whole = seconds == 0 && value < Time::Span.zero ? "-0" : seconds.to_s
       fraction = nanoseconds.abs.to_s.rjust(9, '0').rstrip('0')
-      "#{sign}#{value.to_i.abs}.#{fraction}"
+
+      "#{whole}.#{fraction}"
     end
 
     # Returns the `Time::Span` `value` denotes, or `nil` if it is not a number.
@@ -1278,12 +1903,21 @@ class VirtualDate
       return nil unless value.matches? PATTERN
 
       seconds, _, fraction = value.partition '.'
-      span = Time::Span.new(
-        seconds: seconds.lchop('-').to_i64,
-        nanoseconds: fraction.empty? ? 0i64 : fraction.ljust(9, '0')[0, 9].to_i64
-      )
+      # A number too large for `Int64` matches the pattern but is not a span we
+      # can express. Reporting it as "not a number of seconds" lets the caller
+      # raise with the document position, the way every other bad value does.
+      #
+      # The sign is kept on the whole part rather than applied to the finished
+      # span, since negating `Int64::MIN` -- what `Time::Span::MIN` writes out
+      # as -- has no answer, and that value would then be one this could write
+      # but not read back.
+      whole = seconds.to_i64?
+      return nil unless whole
 
-      seconds.starts_with?('-') ? -span : span
+      nanoseconds = fraction.empty? ? 0i64 : fraction.ljust(9, '0')[0, 9].to_i64
+      nanoseconds = -nanoseconds if seconds.starts_with? '-'
+
+      Time::Span.new seconds: whole, nanoseconds: nanoseconds
     end
   end
 
@@ -1341,9 +1975,11 @@ class VirtualDate
 
       v = node.value
 
-      # Bool
-      return true if v == "true"
-      return false if v == "false"
+      # Bool, in the spellings the YAML core schema accepts -- a hand-written
+      # `True` is a boolean by that schema, and refusing it here while taking
+      # the quoted string `'true'` for one reads as arbitrary.
+      return true if v.in?("true", "True", "TRUE")
+      return false if v.in?("false", "False", "FALSE")
 
       # Seconds
       SecondsSpan.from_scalar?(v) ||
@@ -1419,7 +2055,13 @@ class VirtualDate
     end
 
     private def self.event(inst : Scheduled, now : Time) : Array(String)
-      uid = "#{inst.vdate.id}-#{inst.start.to_unix}@virtualdate"
+      # The stamp carries whole seconds, which `#stagger` can place two
+      # occurrences inside; the fraction is appended only where there is one,
+      # so that the UID of an event on a whole second stays what it was.
+      stamp = inst.start.nanosecond.zero? ? inst.start.to_unix.to_s : "#{inst.start.to_unix}.#{inst.start.nanosecond}"
+      uid = "#{inst.vdate.id}-#{stamp}@virtualdate"
+      starts_at = format_time inst.start
+      ends_at = format_time inst.finish
 
       description = String.build do |io|
         io << inst.explanation
@@ -1432,11 +2074,13 @@ class VirtualDate
         "BEGIN:VEVENT",
         "UID:#{escape(uid)}",
         "DTSTAMP:#{format_time(now)}",
-        "DTSTART:#{format_time(inst.start)}",
+        "DTSTART:#{starts_at}",
         # RFC 5545 section 3.8.2.2 requires DTEND to be strictly later than
         # DTSTART, so a zero-duration vdate leaves it out -- which the RFC
-        # defines as an event ending at the very time it starts.
-        inst.finish > inst.start ? "DTEND:#{format_time(inst.finish)}" : nil,
+        # defines as an event ending at the very time it starts. The two are
+        # compared as rendered, since the format carries whole seconds only and
+        # a duration shorter than one would print an identical DTEND.
+        ends_at > starts_at ? "DTEND:#{ends_at}" : nil,
         "SUMMARY:#{escape(inst.vdate.id)}",
         "DESCRIPTION:#{escape(description)}",
         categories(inst),
