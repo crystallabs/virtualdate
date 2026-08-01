@@ -763,25 +763,15 @@ class VirtualDate
       best = materialize_at vtime, from
       return nil unless best
 
-      MAX_SEED_REFINEMENTS.times do
-        improved = false
+      # Seeds are taken from the unit boundaries around `from` as well as
+      # around the answer so far. Only the latter would leave a rule whose
+      # first pass overshot into a later month with no way back: the seed that
+      # would have found the earlier month lies behind the overshoot.
+      seeds = ->(answer : Time) { unit_starts(from) + unit_starts(answer) }
 
-        # Seeds are taken from the unit boundaries around `from` as well as
-        # around the answer so far. Only the latter would leave a rule whose
-        # first pass overshot into a later month with no way back: the seed
-        # that would have found the earlier month lies behind the overshoot.
-        (unit_starts(from) + unit_starts(best)).each do |seed|
-          candidate = materialize_at vtime, seed
-          next unless candidate && from <= candidate < best
-
-          best = candidate
-          improved = true
-        end
-
-        break unless improved
+      VirtualTime::TimeHelper.refine_earliest best, from, MAX_SEED_REFINEMENTS, seeds do |seed|
+        materialize_at vtime, seed
       end
-
-      best
     end
 
     # Furthest the run walk follows matching stretches in one call. A walk that
@@ -882,44 +872,15 @@ class VirtualDate
       # settled by asking the rule about the clock on the far side: a
       # fall-back that repeats matching time carries on, a gap that skips to a
       # clock the rule refuses ends the stretch where the gap begins.
-      crossing = transition_between at, ending
+      crossing = VirtualTime::TimeHelper.transition_between at, ending
       return ending unless crossing
 
       vtime.matches?(crossing) ? match_block_end(vtime, crossing, depth + 1) : crossing - 1.nanosecond
     end
 
-    # Returns whether the two carry the same wall clock, whatever offset each
-    # reads it with.
-    private def same_wall_clock?(a : Time, b : Time) : Bool
-      a.year == b.year && a.month == b.month && a.day == b.day &&
-        a.hour == b.hour && a.minute == b.minute && a.second == b.second &&
-        a.nanosecond == b.nanosecond
-    end
-
     # Furthest a single matching stretch is followed across UTC offset changes.
     # Two is already more than any zone puts inside one.
     MAX_BLOCK_TRANSITIONS = 3
-
-    # Returns the instant at which the UTC offset changes between the two, or
-    # nil when it does not. Searched down to the nanosecond, since the result
-    # becomes the boundary of a matching stretch.
-    private def transition_between(earlier : Time, later : Time) : Time?
-      return nil if earlier.offset == later.offset
-
-      low, high = earlier, later
-      while (high - low) > 1.nanosecond
-        middle = low + (high - low) / 2
-        break if middle == low || middle == high
-
-        if middle.offset == low.offset
-          low = middle
-        else
-          high = middle
-        end
-      end
-
-      high
-    end
 
     # Returns the largest value at or above `from` that the field allows with
     # every value between the two allowed as well.
@@ -1040,12 +1001,12 @@ class VirtualDate
     # thrown away, leaving the overshoot it was meant to correct standing.
     # Offering both leaves the choice to the search.
     private def fold_twins(time : Time) : Array(Time)
-      fold = (time - 2.hours).offset - (time + 2.hours).offset
-      return [time] unless fold > 0
+      fold = VirtualTime::TimeHelper.dst_fold_at time
+      return [time] unless fold > Time::Span.zero
 
       twins = [time]
-      [time + fold.seconds, time - fold.seconds].each do |twin|
-        twins << twin if same_wall_clock? twin, time
+      [time + fold, time - fold].each do |twin|
+        twins << twin if VirtualTime::TimeHelper.same_wall_clock? twin, time
       end
       twins
     rescue ArgumentError
@@ -1063,10 +1024,11 @@ class VirtualDate
     # search to 23:00 rather than to the start of the day it stands for. Where
     # the wall clock is missing, the unit begins where the gap ends.
     private def unit_start(year : Int32, month : Int32, day : Int32, hour : Int32, minute : Int32, location : Time::Location) : Time?
-      wanted = Time.local year, month, day, hour, minute, 0, location: location
-      return wanted if wanted.year == year && wanted.month == month && wanted.day == day &&
-                       wanted.hour == hour && wanted.minute == minute
+      if exact = VirtualTime::TimeHelper.local? year, month, day, hour, minute, location: location
+        return exact
+      end
 
+      wanted = Time.local year, month, day, hour, minute, 0, location: location
       skew = Time.utc(year, month, day, hour, minute, 0) -
              Time.utc(wanted.year, wanted.month, wanted.day, wanted.hour, wanted.minute, wanted.second)
       return unless skew > Time::Span.zero
@@ -1919,6 +1881,17 @@ class VirtualDate
 
       Time::Span.new seconds: whole, nanoseconds: nanoseconds
     end
+
+    # Returns the `Time::Span` `node` carries, raising at the node's own
+    # position when it holds anything else.
+    def self.from_node(node : YAML::Nodes::Node) : Time::Span
+      unless node.is_a?(YAML::Nodes::Scalar)
+        node.raise "Expected a number of seconds for Time::Span"
+      end
+
+      from_scalar?(node.value) ||
+        node.raise "Expected a number of seconds for Time::Span, got #{node.value.inspect}"
+    end
   end
 
   class TimeSpanSecondsConverter
@@ -1927,30 +1900,17 @@ class VirtualDate
     end
 
     def self.from_yaml(ctx : YAML::ParseContext, node : YAML::Nodes::Node) : Time::Span
-      unless node.is_a?(YAML::Nodes::Scalar)
-        node.raise "Expected a number of seconds for Time::Span"
-      end
-      SecondsSpan.from_scalar?(node.value) ||
-        node.raise "Expected a number of seconds for Time::Span, got #{node.value.inspect}"
+      SecondsSpan.from_node node
     end
   end
 
   class NullableTimeSpanSecondsConverter
     def self.to_yaml(value : Time::Span?, yaml : YAML::Nodes::Builder)
-      if value
-        yaml.scalar SecondsSpan.to_scalar value
-      else
-        yaml.scalar nil
-      end
+      yaml.scalar(value ? SecondsSpan.to_scalar(value) : nil)
     end
 
     def self.from_yaml(ctx : YAML::ParseContext, node : YAML::Nodes::Node) : Time::Span?
-      return nil if YAML::Schema::Core.parse_null?(node)
-      unless node.is_a?(YAML::Nodes::Scalar)
-        node.raise "Expected a number of seconds for Time::Span?"
-      end
-      SecondsSpan.from_scalar?(node.value) ||
-        node.raise "Expected a number of seconds for Time::Span?, got #{node.value.inspect}"
+      YAML::Schema::Core.parse_null?(node) ? nil : SecondsSpan.from_node(node)
     end
   end
 
