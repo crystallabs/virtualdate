@@ -2439,6 +2439,97 @@ describe "VirtualDate – advanced scheduling" do
     end
   end
 
+  it "raises when a dependency names an id that more than one vdate carries" do
+    first = VirtualDate.new("twin")
+    second = VirtualDate.new("twin")
+    dependent = VirtualDate.new("dependent")
+    dependent.depends_on_ids << "twin"
+
+    # Regression: the id index kept whichever came last, and the dependent was
+    # silently placed against that one
+    expect_raises(ArgumentError, /'twin', which is the id of more than one vdate/) do
+      VirtualDate::Scheduler.new([first, second, dependent])
+    end
+
+    # Ids are only required to be unambiguous where something depends on them
+    VirtualDate::Scheduler.new([first, second])
+      .build(Time.utc(2023, 5, 10), Time.utc(2023, 5, 11)).size.should eq 2
+  end
+
+  it "explains a fixed vdate's rejection by another fixed vdate" do
+    at = Time.utc(2023, 5, 10, 9)
+    a = VirtualDate.new("a")
+    b = VirtualDate.new("b")
+    [a, b].each do |vdate|
+      vdate.fixed = true
+      vdate.duration = 1.hour
+      vdate.flags << "f"
+    end
+
+    scheduler = VirtualDate::Scheduler.new([a, b])
+    candidate = VirtualDate::Candidate.new(b, at)
+
+    # Regression: this was the one rejection that left no explanation behind
+    scheduler.schedule_candidate(candidate, [VirtualDate::Scheduled.new(a, at)], horizon: at + 1.day).should be_nil
+    candidate.explanation.to_s.should match /Rejected: being fixed, it cannot move past fixed vdate a/
+  end
+
+  it "holds a re-placed occurrence to the deadline its origin resolved to" do
+    from = Time.utc(2023, 5, 10, 9)
+    to = Time.utc(2023, 5, 16)
+
+    # Two fixed walls leave the "f" group only one gap, May 12 10:00-10:10,
+    # before May 15 09:30
+    wall1 = VirtualDate.new("wall1")
+    wall1.fixed = true
+    wall1.duration = 2.days + 1.hour
+
+    wall2 = VirtualDate.new("wall2")
+    wall2.fixed = true
+    wall2.due << VirtualTime.new(month: 5, day: 12, hour: 10, minute: 10)
+    wall2.duration = 2.days + 23.hours + 20.minutes
+
+    # Due at the window start, so it first slips into that gap
+    low = VirtualDate.new("a")
+    low.due << VirtualTime.new(month: 5, day: 10, hour: 9, minute: 0)
+    low.duration = 10.minutes
+    low.shift = 1.hour
+    low.deadline = VirtualTime.new(day: 15)
+
+    # A fixed vdate that reaches the gap only after its dependency, and so
+    # only after "a" is already in it -- and then displaces it
+    dep = VirtualDate.new("b")
+    dep.due << VirtualTime.new(month: 5, day: 12, hour: 9, minute: 50)
+    dep.duration = 10.minutes
+    dep.flags << "g"
+
+    high = VirtualDate.new("c")
+    high.fixed = true
+    high.duration = 10.minutes
+    high.depends_on << dep
+
+    [wall1, wall2, low, high].each(&.flags.<<("f"))
+
+    # Resolved against the origin, May 10 09:00, the deadline is May 15 09:00,
+    # which the only room left after the displacement -- May 15 09:30 -- misses.
+    # Regression: it was resolved against the start the occurrence lost, May
+    # 12 10:00, and so came out as May 15 10:00 -- a looser deadline than the
+    # one it was first placed under, gained by being displaced
+    scheduled = VirtualDate::Scheduler.new([wall1, wall2, low, dep, high]).build(from, to)
+    scheduled.map(&.vdate.id).sort!.should eq %w[b c wall1 wall2]
+
+    # The same schedule without the deadline shows the room it was refused
+    low.deadline = nil
+    scheduled = VirtualDate::Scheduler.new([wall1, wall2, low, dep, high]).build(from, to)
+    scheduled.find!(&.vdate.id.==("a")).start.should eq Time.utc(2023, 5, 15, 9, 30)
+  end
+
+  it "reports an empty YAML document as an ArgumentError" do
+    expect_raises(ArgumentError, /Empty YAML document/) do
+      VirtualDate::YamlValidator.validate! ""
+    end
+  end
+
   it "re-places every displaced occurrence, not a guard-limited prefix" do
     # 120 hourly occurrences of "a-movable" are placed first, then the
     # dependency-delayed higher-priority vdate displaces all of them; every

@@ -3,7 +3,7 @@ require "virtualtime"
 # VirtualDate builds on VirtualTime to represent due/omit rules plus higher-level scheduling semantics.
 class VirtualDate
   VERSION_MAJOR    = 1
-  VERSION_MINOR    = 5
+  VERSION_MINOR    = 9
   VERSION_REVISION = 0
   VERSION          = [VERSION_MAJOR, VERSION_MINOR, VERSION_REVISION].join '.'
 
@@ -407,7 +407,20 @@ class VirtualDate
     def resolve_dependencies!
       index = @vdates.to_h { |vdate| {vdate.id, vdate} }
 
+      # Ids are not required to be unique -- vdates that nothing depends on
+      # get by without one at all -- but a dependency on an id two vdates
+      # share cannot be resolved: binding it to whichever of them came last
+      # would place the dependent against a vdate the author may not have
+      # meant, and silently so.
+      ambiguous = @vdates.group_by(&.id).select { |_, same| same.size > 1 }.keys.to_set
+
       @vdates.each do |vdate|
+        vdate.depends_on_ids.each do |id|
+          if ambiguous.includes? id
+            raise ArgumentError.new("Vdate '#{vdate.id}' depends on '#{id}', which is the id of more than one vdate")
+          end
+        end
+
         vdate.resolve_dependencies!(index)
       end
     end
@@ -687,20 +700,27 @@ class VirtualDate
         head = first_occurrence vtime, from
         next unless head && head < to
 
-        # Stepped from just before the head, so that the head itself is the
-        # first thing yielded. The first instant the calendar holds has nothing
-        # before it, and there the head is handed over by hand instead.
+        # `VirtualTime#step` yields the earliest match at or after `from`, so
+        # stepping from the head makes the head itself the first thing
+        # yielded. (It does so by asking `#succ` about the nanosecond before,
+        # which is why subtracting one here as well -- as was needed before
+        # virtualtime 1.9, whose `#step` began strictly after `from` -- put
+        # the first yield a nanosecond ahead of the head, and so ahead of the
+        # window: the occurrence was then thrown out as starting before it.)
+        # The first instant the calendar holds has nothing before it to ask
+        # about; there the head is handed over by hand and the walk resumes
+        # strictly after it -- an empty walk if nothing matches after it.
         pending_head = false
         iter =
           begin
-            vtime.step(granularity, from: head - 1.nanosecond)
+            vtime.step(granularity, from: head)
           rescue ArgumentError
             pending_head = true
 
             begin
-              vtime.step(granularity, from: head)
+              vtime.step(granularity, from: head + 1.nanosecond)
             rescue ArgumentError
-              next
+              ([] of Time).each
             end
           end
 
@@ -1264,13 +1284,17 @@ class VirtualDate
       # materialized. Every other `VirtualTime`-valued field tolerates one of
       # those by simply never matching, and a deadline that can never arrive is
       # a deadline the vdate can never meet.
+      # It is `origin` and not `start` that the pattern is resolved against: a
+      # re-placement after displacement arrives with the start it lost, and
+      # resolving from there would hold it to a different deadline than the
+      # one it was placed under the first time.
       deadline_time =
         case deadline = vdate.deadline
         when Time
           deadline
         when VirtualTime
           begin
-            deadline.to_time start
+            deadline.to_time origin
           rescue ArgumentError
             explanation.add "Rejected: deadline #{deadline} names no real time"
             return nil
@@ -1381,7 +1405,10 @@ class VirtualDate
             end
 
             # Otherwise respect fixed semantics
-            return nil if vdate.fixed?
+            if vdate.fixed?
+              explanation.add "Rejected: being fixed, it cannot move past fixed vdate #{conflict.vdate.id} (#{conflict.start}-#{conflict.finish})"
+              return nil
+            end
 
             explanation.add "Yielded to fixed vdate #{conflict.vdate.id} (#{conflict.start}-#{conflict.finish}), shifted from #{start} to #{conflict.finish}"
             start = conflict.finish
@@ -1715,7 +1742,7 @@ class VirtualDate
 
     def validate!(yaml : String)
       doc = YAML::Nodes.parse(yaml)
-      root = doc.nodes.first? || raise "Empty YAML document"
+      root = doc.nodes.first? || raise ArgumentError.new("Empty YAML document")
 
       validate! root
     end
