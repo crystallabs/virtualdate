@@ -20,9 +20,10 @@ targets:
 dependencies:
   virtualtime:
     github: crystallabs/virtualtime
-    # The scheduler generates occurrences with VirtualTime#step, so it relies on
-    # 1.7.0's forward-only, DST-correct and location-aware materialization
-    version: ~> 1.7
+    # The occurrence scan is written against 1.9's VirtualTime#step, which yields
+    # the match at `from` itself, and it calls TimeHelper.local?, which 1.8 added;
+    # against 1.7 it does not compile.
+    version: ~> 1.9
 
 development_dependencies:
   ameba:

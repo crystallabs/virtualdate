@@ -13,4 +13,4 @@ license: AGPL-3.0
 dependencies:
   virtualtime:
     path: ../../virtualtime
-    version: ~> 1.7
+    version: ~> 1.9
