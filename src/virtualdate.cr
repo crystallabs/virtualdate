@@ -355,6 +355,110 @@ class VirtualDate
     end
   end
 
+  # Returns the start of the earliest occurrence strictly after `after`, or
+  # `nil` when there is none: the series has ended, `#due` is empty, or
+  # nothing was found within `max_candidates` occurrences.
+  #
+  # An occurrence is a contiguous stretch of due time (see `MatchRun`): a due
+  # time naming only a day is due for the whole of it, and consecutive due
+  # days run together into one occurrence. A rule meant to recur once a day
+  # therefore names a time of day too (`hour: 0`), and a day-granular caller
+  # asks from the end of the current day to get the next one. An `after`
+  # that falls inside an occurrence is answered with the one following it.
+  #
+  # Each occurrence start is settled with `#resolve`: one that is on as asked
+  # is the answer, one that is omitted and shifted counts at the time it
+  # shifts to, and one that is omitted without a shift is passed over. A
+  # shifted start is only accepted once no later one settles earlier than it.
+  def next_on(after : Time, *, max_candidates : Int32 = 1000) : Time?
+    return if @due.empty?
+
+    from = occurrence_search_start(after) || return
+
+    best = nil.as(Time?)
+    max_candidates.times do
+      candidate = occurrence_start_after(from)
+      break unless candidate && (best.nil? || candidate < best)
+
+      if settled = settle_occurrence(candidate, after)
+        best = settled if best.nil? || settled < best
+        break if settled == candidate
+      end
+
+      from = due_stretch_end(candidate) || break
+    end
+    best
+  end
+
+  # The earliest start of due time strictly after `from`, `nil` when there is
+  # none or it lies past an absolute `#end`.
+  private def occurrence_start_after(from : Time) : Time?
+    candidate = @due.compact_map { |vtime| next_match vtime, from }.min?
+    return unless candidate
+
+    last = @end
+    candidate unless last.is_a?(Time) && candidate > last
+  end
+
+  # Where `#next_on` starts looking for occurrences after `after`. Nothing
+  # before an absolute `#begin` can be on, so the search starts there rather
+  # than walking every candidate up to it; and an `after` inside an occurrence
+  # is moved to that occurrence's end, since the one wanted follows it. `nil`
+  # when that occurrence never ends.
+  private def occurrence_search_start(after : Time) : Time?
+    from = after
+    if (first = @begin).is_a?(Time) && first > from
+      from = first - 1.nanosecond
+    end
+    @due.any?(&.matches?(from)) ? due_stretch_end(from) : from
+  end
+
+  # The time at which the occurrence starting at `start` is on, worked out
+  # with `#resolve`: `start` itself, the time an omitted one shifts to when
+  # that falls after `after`, and `nil` for one passed over.
+  private def settle_occurrence(start : Time, after : Time) : Time?
+    case settled = resolve(start)
+    when Time
+      settled if settled > after
+    when true
+      start
+    end
+  end
+
+  # Furthest `#due_stretch_end` follows a stretch over the due times that
+  # continue it.
+  MAX_STRETCH_STEPS = 64
+
+  # The first time strictly after `from` that `vtime` matches, `nil` when it
+  # never does.
+  private def next_match(vtime : VirtualTime, from : Time) : Time?
+    vtime.succ from
+  rescue ArgumentError
+    nil
+  end
+
+  # Returns the last instant of the contiguous stretch of due time that `at`
+  # belongs to: as far as any due time matching it keeps matching, carried on
+  # over any due time that picks up right where that one stops. A due time
+  # naming only a day is due for the whole of it, and the next occurrence is
+  # looked for after the stretch, not after its first nanosecond. `nil` when
+  # the stretch is still going after `MAX_STRETCH_STEPS` blocks: due times
+  # that never stop matching make one endless occurrence, with nothing after
+  # it to find.
+  private def due_stretch_end(at : Time) : Time?
+    ending = at
+    MAX_STRETCH_STEPS.times do
+      matching = @due.select(&.matches?(ending))
+      return ending if matching.empty?
+
+      ending = matching.max_of { |vtime| MatchRun.block_end vtime, ending }
+      return ending unless @due.any?(&.matches?(ending + 1.nanosecond))
+
+      ending += 1.nanosecond
+    end
+    nil
+  end
+
   @[AlwaysInline]
   private def shifts_exhausted?(max_shifts)
     max_shifts && max_shifts <= 0
@@ -376,6 +480,134 @@ class VirtualDate
     # to compare a bound against. Every `#matches?`-based predicate beside this
     # one lets such a pattern simply never match, rather than raising.
     nil
+  end
+
+  # Where a rule's matching time starts and stops. A `VirtualTime` with an
+  # unconstrained field matches for every value of it, so a rule naming only a
+  # day matches the whole of that day: one contiguous stretch, not a match per
+  # nanosecond. Both the `Scheduler` and `#next_on` need to know where such a
+  # stretch ends to move on to the next one.
+  module MatchRun
+    # Returns the last instant of the stretch of matching time that `at`
+    # belongs to.
+    #
+    # A rule matches continuously for as long as its finest constrained field
+    # holds: `minute: 6` matches every instant of that minute, `hour: 20` every
+    # instant of that hour. Where nothing finer than the date is named, the
+    # stretch runs to the end of the day.
+    def self.block_end(vtime : VirtualTime, at : Time, depth : Int32 = 0) : Time # ameba:disable Metrics/CyclomaticComplexity
+      last =
+        if constrains?(vtime.nanosecond, 1_000_000_000)
+          # Both name an offset within the same second rather than one nested
+          # in the other, so a stretch runs only as far as the two agree
+          nanos = contiguous_last vtime.nanosecond, at.nanosecond, 1_000_000_000
+          if constrains? vtime.millisecond, 1_000
+            within_ms = (contiguous_last(vtime.millisecond, at.nanosecond // 1_000_000, 1_000) + 1) * 1_000_000 - 1
+            nanos = within_ms if within_ms < nanos
+          end
+          {at.hour, at.minute, at.second, nanos}
+        elsif constrains?(vtime.millisecond, 1_000)
+          {at.hour, at.minute, at.second,
+           (contiguous_last(vtime.millisecond, at.nanosecond // 1_000_000, 1_000) + 1) * 1_000_000 - 1}
+        elsif constrains?(vtime.second, 60)
+          {at.hour, at.minute, contiguous_last(vtime.second, at.second, 60), 999_999_999}
+        elsif constrains?(vtime.minute, 60)
+          {at.hour, contiguous_last(vtime.minute, at.minute, 60), 59, 999_999_999}
+        elsif constrains?(vtime.hour, 24)
+          {contiguous_last(vtime.hour, at.hour, 24), 59, 59, 999_999_999}
+        else
+          {23, 59, 59, 999_999_999}
+        end
+
+      # How far the stretch reaches is a question about wall clocks, but the
+      # answer has to be an instant -- so the wall-clock distance is measured
+      # naively and added on. Where no transition falls inside, the two agree
+      # and the offset comes out unchanged; a rebuild through `Time.local`
+      # would instead have to guess which side of a fold to land on, and for a
+      # clock a gap swallowed it can land before `at` altogether.
+      span = Time.utc(at.year, at.month, at.day, last[0], last[1], last[2], nanosecond: last[3]) -
+             Time.utc(at.year, at.month, at.day, at.hour, at.minute, at.second, nanosecond: at.nanosecond)
+      return at if span <= Time::Span.zero
+
+      ending = at + span
+      return ending if ending.offset == at.offset || depth >= MAX_BLOCK_TRANSITIONS
+
+      # A transition falls inside. Whether the stretch carries on past it is
+      # settled by asking the rule about the clock on the far side: a
+      # fall-back that repeats matching time carries on, a gap that skips to a
+      # clock the rule refuses ends the stretch where the gap begins.
+      crossing = VirtualTime::TimeHelper.transition_between at, ending
+      return ending unless crossing
+
+      vtime.matches?(crossing) ? block_end(vtime, crossing, depth + 1) : crossing - 1.nanosecond
+    end
+
+    # Furthest a single matching stretch is followed across UTC offset changes.
+    # Two is already more than any zone puts inside one.
+    MAX_BLOCK_TRANSITIONS = 3
+
+    # Returns the largest value at or above `from` that the field allows with
+    # every value between the two allowed as well.
+    #
+    # A rule matches continuously for as long as its finest constrained field
+    # keeps saying yes, and consecutive allowed values are one stretch, not one
+    # each: `nanosecond: 0..500_000_000` matches for half of every second, and
+    # counting that as five hundred million stretches is what turns a
+    # millisecond of window into half a second of work. Read from the bounds,
+    # never by walking them.
+    def self.contiguous_last(value, from : Int32, size : Int32) : Int32 # ameba:disable Metrics/CyclomaticComplexity
+      case value
+      when Nil
+        size - 1
+      when Bool
+        value ? size - 1 : from
+      when Range(Int32, Int32)
+        return from if value.begin < 0 || value.end < 0
+
+        last = value.exclusive? ? value.end - 1 : value.end
+        last < from ? from : {last, size - 1}.min
+      when Array(Int32), Set(Int32)
+        return from if value.any?(&.<(0))
+
+        last = from
+        # `Array#to_a` hands back the array itself, so it is sorted as a copy --
+        # this is a query, and reordering the caller's own rule is not its place
+        value.to_a.sort.each { |allowed| last = allowed if allowed == last + 1 }
+        last
+      when Steppable::StepIterator(Int32, Int32, Int32)
+        return from unless value.step == 1 && value.current >= 0 && value.limit >= 0
+
+        last = value.exclusive ? value.limit - 1 : value.limit
+        last < from ? from : {last, size - 1}.min
+      else
+        from
+      end
+    end
+
+    # Returns whether `value` narrows a field at all.
+    #
+    # A rule letting every value of a field through matches for as long as the
+    # field above it does; counting it as a constraint would cut one continuous
+    # stretch into as many as the field has values -- a thousand per second for
+    # `millisecond: 0..999`, a billion for the nanoseconds under it -- and the
+    # run walk would then step through every one of them.
+    def self.constrains?(value, size : Int32) : Bool
+      case value
+      when Nil
+        false
+      when Bool
+        # `true` lets everything through; `false` nothing, and a rule matching
+        # nothing has no stretch to measure either way
+        !value
+      when Range(Int32, Int32)
+        last = value.exclusive? ? value.end - 1 : value.end
+        !(value.begin <= 0 && last >= size - 1)
+      when Array(Int32), Set(Int32)
+        value.size < size || !(0...size).all? { |v| value.includes? v }
+      else
+        true
+      end
+    end
   end
 
   # A simple, deterministic scheduler for VirtualDate vdates.
@@ -898,7 +1130,7 @@ class VirtualDate
     # Nothing past `limit` is of interest: every run starts before it, so an end
     # that reaches it already covers whatever else there is to merge with.
     private def run_end(vtime : VirtualTime, at : Time, granularity : Time::Span, limit : Time) : Tuple(Time, Bool)
-      ending = match_block_end vtime, at
+      ending = MatchRun.block_end vtime, at
 
       MAX_RUN_STEPS.times do
         return {ending, false} if ending >= limit
@@ -919,134 +1151,13 @@ class VirtualDate
 
         return {ending, false} if (resumes - ending) > granularity
 
-        moved = match_block_end vtime, resumes
+        moved = MatchRun.block_end vtime, resumes
         return {ending, false} if moved <= ending
 
         ending = moved
       end
 
       {ending, true}
-    end
-
-    # Returns the last instant of the stretch of matching time that `at`
-    # belongs to.
-    #
-    # A rule matches continuously for as long as its finest constrained field
-    # holds: `minute: 6` matches every instant of that minute, `hour: 20` every
-    # instant of that hour. Where nothing finer than the date is named, the
-    # stretch runs to the end of the day.
-    private def match_block_end(vtime : VirtualTime, at : Time, depth : Int32 = 0) : Time # ameba:disable Metrics/CyclomaticComplexity
-      last =
-        if constrains?(vtime.nanosecond, 1_000_000_000)
-          # Both name an offset within the same second rather than one nested
-          # in the other, so a stretch runs only as far as the two agree
-          nanos = contiguous_last vtime.nanosecond, at.nanosecond, 1_000_000_000
-          if constrains? vtime.millisecond, 1_000
-            within_ms = (contiguous_last(vtime.millisecond, at.nanosecond // 1_000_000, 1_000) + 1) * 1_000_000 - 1
-            nanos = within_ms if within_ms < nanos
-          end
-          {at.hour, at.minute, at.second, nanos}
-        elsif constrains?(vtime.millisecond, 1_000)
-          {at.hour, at.minute, at.second,
-           (contiguous_last(vtime.millisecond, at.nanosecond // 1_000_000, 1_000) + 1) * 1_000_000 - 1}
-        elsif constrains?(vtime.second, 60)
-          {at.hour, at.minute, contiguous_last(vtime.second, at.second, 60), 999_999_999}
-        elsif constrains?(vtime.minute, 60)
-          {at.hour, contiguous_last(vtime.minute, at.minute, 60), 59, 999_999_999}
-        elsif constrains?(vtime.hour, 24)
-          {contiguous_last(vtime.hour, at.hour, 24), 59, 59, 999_999_999}
-        else
-          {23, 59, 59, 999_999_999}
-        end
-
-      # How far the stretch reaches is a question about wall clocks, but the
-      # answer has to be an instant -- so the wall-clock distance is measured
-      # naively and added on. Where no transition falls inside, the two agree
-      # and the offset comes out unchanged; a rebuild through `Time.local`
-      # would instead have to guess which side of a fold to land on, and for a
-      # clock a gap swallowed it can land before `at` altogether.
-      span = Time.utc(at.year, at.month, at.day, last[0], last[1], last[2], nanosecond: last[3]) -
-             Time.utc(at.year, at.month, at.day, at.hour, at.minute, at.second, nanosecond: at.nanosecond)
-      return at if span <= Time::Span.zero
-
-      ending = at + span
-      return ending if ending.offset == at.offset || depth >= MAX_BLOCK_TRANSITIONS
-
-      # A transition falls inside. Whether the stretch carries on past it is
-      # settled by asking the rule about the clock on the far side: a
-      # fall-back that repeats matching time carries on, a gap that skips to a
-      # clock the rule refuses ends the stretch where the gap begins.
-      crossing = VirtualTime::TimeHelper.transition_between at, ending
-      return ending unless crossing
-
-      vtime.matches?(crossing) ? match_block_end(vtime, crossing, depth + 1) : crossing - 1.nanosecond
-    end
-
-    # Furthest a single matching stretch is followed across UTC offset changes.
-    # Two is already more than any zone puts inside one.
-    MAX_BLOCK_TRANSITIONS = 3
-
-    # Returns the largest value at or above `from` that the field allows with
-    # every value between the two allowed as well.
-    #
-    # A rule matches continuously for as long as its finest constrained field
-    # keeps saying yes, and consecutive allowed values are one stretch, not one
-    # each: `nanosecond: 0..500_000_000` matches for half of every second, and
-    # counting that as five hundred million stretches is what turns a
-    # millisecond of window into half a second of work. Read from the bounds,
-    # never by walking them.
-    private def contiguous_last(value, from : Int32, size : Int32) : Int32 # ameba:disable Metrics/CyclomaticComplexity
-      case value
-      when Nil
-        size - 1
-      when Bool
-        value ? size - 1 : from
-      when Range(Int32, Int32)
-        return from if value.begin < 0 || value.end < 0
-
-        last = value.exclusive? ? value.end - 1 : value.end
-        last < from ? from : {last, size - 1}.min
-      when Array(Int32), Set(Int32)
-        return from if value.any?(&.<(0))
-
-        last = from
-        # `Array#to_a` hands back the array itself, so it is sorted as a copy --
-        # this is a query, and reordering the caller's own rule is not its place
-        value.to_a.sort.each { |allowed| last = allowed if allowed == last + 1 }
-        last
-      when Steppable::StepIterator(Int32, Int32, Int32)
-        return from unless value.step == 1 && value.current >= 0 && value.limit >= 0
-
-        last = value.exclusive ? value.limit - 1 : value.limit
-        last < from ? from : {last, size - 1}.min
-      else
-        from
-      end
-    end
-
-    # Returns whether `value` narrows a field at all.
-    #
-    # A rule letting every value of a field through matches for as long as the
-    # field above it does; counting it as a constraint would cut one continuous
-    # stretch into as many as the field has values -- a thousand per second for
-    # `millisecond: 0..999`, a billion for the nanoseconds under it -- and the
-    # run walk would then step through every one of them.
-    private def constrains?(value, size : Int32) : Bool
-      case value
-      when Nil
-        false
-      when Bool
-        # `true` lets everything through; `false` nothing, and a rule matching
-        # nothing has no stretch to measure either way
-        !value
-      when Range(Int32, Int32)
-        last = value.exclusive? ? value.end - 1 : value.end
-        !(value.begin <= 0 && last >= size - 1)
-      when Array(Int32), Set(Int32)
-        value.size < size || !(0...size).all? { |v| value.includes? v }
-      else
-        true
-      end
     end
 
     # Returns the first time at or after `hint` that `vtime` matches.

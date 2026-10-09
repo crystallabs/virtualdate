@@ -98,6 +98,16 @@ p vd.strict_on?( Time["2017-03-22"]) # ==> nil
 p vd.resolve( Time["2017-03-20"]) # ==> 2017-03-22 00:00:00
 ```
 
+To walk a VirtualDate's occurrences forward, `next_on` returns the start of the earliest
+occurrence strictly after the asked time (shifts applied, omitted times passed over, `begin`/`end`
+respected), or `nil` once the series is exhausted. An occurrence is a contiguous stretch of due
+time, so a due time naming only a day is due for the whole of it and consecutive due days run
+together; a rule meant to recur daily names a time of day as well (`hour: 0`):
+
+```crystal
+p vd.next_on( Time["2017-03-16"]) # ==> 2017-03-18 00:00:00
+```
+
 Here's another example of a VirtualDate that is due on every other day in March, but if it falls
 on a weekend it is ignored:
 

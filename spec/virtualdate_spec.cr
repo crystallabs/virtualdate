@@ -3950,3 +3950,90 @@ describe "VirtualDate – advanced scheduling" do
     end
   end
 end
+
+describe "VirtualDate#next_on" do
+  it "finds the start of the next occurrence strictly after the asked time" do
+    vd = VirtualDate.new
+    vd.due << VirtualTime.new(day: 15)
+    vd.next_on(Time.local(2026, 10, 9)).should eq Time.local(2026, 10, 15)
+    # Inside the occurrence of the 15th: the whole day is one stretch
+    vd.next_on(Time.local(2026, 10, 15)).should eq Time.local(2026, 11, 15)
+    vd.next_on(Time.local(2026, 10, 15, 12)).should eq Time.local(2026, 11, 15)
+    vd.next_on(Time.local(2026, 10, 15).at_end_of_day).should eq Time.local(2026, 11, 15)
+  end
+
+  it "takes the earliest of several due times" do
+    vd = VirtualDate.new
+    vd.due << VirtualTime.new(day: 20)
+    vd.due << VirtualTime.new(day: 12)
+    vd.next_on(Time.local(2026, 10, 9)).should eq Time.local(2026, 10, 12)
+    vd.next_on(Time.local(2026, 10, 12).at_end_of_day).should eq Time.local(2026, 10, 20)
+  end
+
+  it "runs consecutive due days together into one occurrence" do
+    vd = VirtualDate.new
+    vd.due << VirtualTime.new(day: 10..12)
+    vd.next_on(Time.local(2026, 10, 9)).should eq Time.local(2026, 10, 10)
+    vd.next_on(Time.local(2026, 10, 10)).should eq Time.local(2026, 11, 10)
+    vd.next_on(Time.local(2026, 10, 11).at_end_of_day).should eq Time.local(2026, 11, 10)
+
+    # Days that are due all the time are one endless occurrence
+    vd = VirtualDate.new
+    vd.due << VirtualTime.new(day_of_week: 1..7)
+    vd.next_on(Time.local(2026, 10, 9)).should be_nil
+    # Pinning a time of day makes each day its own occurrence
+    vd = VirtualDate.new
+    vd.due << VirtualTime.new(day_of_week: 1..7, hour: 0)
+    vd.next_on(Time.local(2026, 10, 9)).should eq Time.local(2026, 10, 10)
+    vd.next_on(Time.local(2026, 10, 10)).should eq Time.local(2026, 10, 11)
+  end
+
+  it "starts at an absolute begin and stops at an absolute end" do
+    vd = VirtualDate.new
+    vd.begin = Time.local(2027, 1, 1)
+    vd.end = Time.local(2027, 3, 1)
+    vd.due << VirtualTime.new(day: 1)
+    vd.next_on(Time.local(2020, 1, 1)).should eq Time.local(2027, 1, 1)
+    vd.next_on(Time.local(2027, 2, 1).at_end_of_day).should eq Time.local(2027, 3, 1)
+    vd.next_on(Time.local(2027, 3, 1).at_end_of_day).should be_nil
+  end
+
+  it "passes over omitted occurrences and reports a shifted one at its shifted time" do
+    vd = VirtualDate.new
+    vd.due << VirtualTime.new(day_of_week: 1..7, hour: 0)
+    vd.omit << VirtualTime.new(day_of_week: [6, 7])
+    vd.shift = nil
+    vd.next_on(Time.local(2026, 10, 9).at_end_of_day).should eq Time.local(2026, 10, 12)
+
+    vd.shift = 1.day
+    vd.next_on(Time.local(2026, 10, 9).at_end_of_day).should eq Time.local(2026, 10, 12)
+
+    vd = VirtualDate.new
+    vd.due << VirtualTime.new(day: 10)
+    vd.omit << VirtualTime.new(day: 10)
+    vd.shift = 5.days
+    vd.next_on(Time.local(2026, 10, 9)).should eq Time.local(2026, 10, 15)
+  end
+
+  it "accepts a shifted occurrence only when no later one settles earlier" do
+    vd = VirtualDate.new
+    vd.due << VirtualTime.new(day: [10, 20])
+    vd.omit << VirtualTime.new(day: 10)
+    vd.shift = 5.days
+    vd.next_on(Time.local(2026, 10, 9)).should eq Time.local(2026, 10, 15)
+    vd.shift = 12.days
+    vd.next_on(Time.local(2026, 10, 9)).should eq Time.local(2026, 10, 20)
+  end
+
+  it "answers nil with nothing due or when nothing is found in the candidate budget" do
+    VirtualDate.new.next_on(Time.local(2026, 10, 9)).should be_nil
+    vd = VirtualDate.new
+    vd.due << VirtualTime.new(month: 2, day: 30)
+    vd.next_on(Time.local(2026, 10, 9)).should be_nil
+    vd = VirtualDate.new
+    vd.due << VirtualTime.new(day: 1)
+    vd.omit << VirtualTime.new(day: 1)
+    vd.shift = nil
+    vd.next_on(Time.local(2026, 10, 9), max_candidates: 3).should be_nil
+  end
+end
