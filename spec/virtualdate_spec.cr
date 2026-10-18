@@ -4037,3 +4037,11 @@ describe "VirtualDate#next_on" do
     vd.next_on(Time.local(2026, 10, 9), max_candidates: 3).should be_nil
   end
 end
+
+describe "VirtualDate::VERSION" do
+  it "matches the version shard.yml declares" do
+    # Regression: the constants lagged behind shard.yml by a release
+    declared = YAML.parse(File.read(File.join(__DIR__, "..", "shard.yml")))["version"].as_s
+    VirtualDate::VERSION.should eq declared
+  end
+end
