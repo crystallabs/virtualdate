@@ -2990,7 +2990,7 @@ describe "VirtualDate – advanced scheduling" do
     yaml.should contain "shift: -90"
     yaml.should contain "max_shift: 7200"
 
-    # Documents that documents written by older versions still load
+    # Documents written by older versions still load
     VirtualDate.from_yaml(yaml).duration.should eq 1.hour
   end
 

@@ -116,7 +116,7 @@ class VirtualDate
   #
   # Unlike `#strict_on?`, this method never returns nil or Time::Span.
   #
-  # (For omit-driven shifting (Time::Span), we can search candidate base times by shifting back in the opposide direction.
+  # (For omit-driven shifting (Time::Span), we can search candidate base times by shifting back in the opposite direction.
   # This is deterministic, bounded by max_shifts/max_shift.)
   def on?(time : Time, *, max_shift = @max_shift, max_shifts = @max_shifts) : Bool
     # 1. Direct check
@@ -161,7 +161,7 @@ class VirtualDate
   #
   # IMPORTANT: If the vdate is rescheduled away from the asked time,
   # `strict_on?` returns a Time::Span, but querying `strict_on?` at the rescheduled time will not
-  # necessarily return true. Use `#resolve` or `#on?` to return a true falue for shifted dates/times.
+  # necessarily return true. Use `#resolve` or `#on?` to return a true value for shifted dates/times.
   # ameba:disable Metrics/CyclomaticComplexity
   def strict_on?(time : VirtualTime::TimeOrVirtualTime = Time.local, *, max_shift = @max_shift, max_shifts = @max_shifts, hint = time.is_a?(Time) ? time : Time.local) : Nil | Bool | Time::Span
     # If `@on` is non-nil, it overrides vdate's status unconditionally.
@@ -370,6 +370,11 @@ class VirtualDate
   # is the answer, one that is omitted and shifted counts at the time it
   # shifts to, and one that is omitted without a shift is passed over. A
   # shifted start is only accepted once no later one settles earlier than it.
+  #
+  # Only occurrences starting after `after` are considered. One that started
+  # at or before it and shifts past it is not reported, even though `#on?`
+  # answers true for its shifted time: finding it would mean walking back
+  # over every occurrence within the total shift bound.
   def next_on(after : Time, *, max_candidates : Int32 = 1000) : Time?
     return if @due.empty?
 
@@ -613,7 +618,7 @@ class VirtualDate
   # A simple, deterministic scheduler for VirtualDate vdates.
   #
   # This scheduler:
-  # - Generates candidate candidates from `vdate.due` VirtualTimes
+  # - Generates candidates from `vdate.due` VirtualTimes
   # - Resolves omit-driven shifts via `VirtualDate#resolve`
   # - Enforces conflict resolution using `duration`, `flags`, `parallel`
   # - Reschedules forward on conflicts when possible
@@ -1590,7 +1595,7 @@ class VirtualDate
     # True if `vdate` is considered “on” at `time` in the produced schedule.
     def on_in_schedule?(scheduled_vdates : Array(Scheduled), vdate : VirtualDate, time : Time) : Bool
       scheduled_vdates.any? do |i|
-        next false unless i.vdate == vdate
+        next false unless i.vdate.same? vdate
 
         if i.start == i.finish
           time == i.start
@@ -1679,7 +1684,7 @@ class VirtualDate
       overlaps? subject.start, subject.finish, other.start, other.finish
     end
 
-    # Ensure there are no depdendency cycles or raise.
+    # Ensure there are no dependency cycles or raise.
     private def validate_no_dependency_cycles!
       visiting = Set(VirtualDate).new
       visited = Set(VirtualDate).new
@@ -2023,7 +2028,7 @@ class VirtualDate
   def resolve_dependencies!(index : Hash(String, VirtualDate))
     return if @depends_on_ids.empty?
 
-    @depends_on = @depends_on_ids.compact_map do |id|
+    @depends_on = @depends_on_ids.map do |id|
       index[id]? || raise ArgumentError.new("Unknown dependency '#{id}'")
     end
 
