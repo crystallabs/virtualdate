@@ -194,7 +194,21 @@ and probably not something to be used.
 
 ## Scheduling
 
-There is support for loading/saving schedule to YAML and exporting to iCal.
+`VirtualDate::Scheduler` places the occurrences of a set of vdates in a window, resolving
+conflicts by `duration`, `flags`, `parallel`, `priority`, `fixed` and `depends_on`. Vdates
+load from and save to YAML through `VirtualDateFile`, and a built schedule exports to iCal:
+
+```crystal
+vdates = VirtualDate::VirtualDateFile.load(File.read("vdates.yml"))
+
+scheduled = VirtualDate::Scheduler.new(vdates).build(Time.local(2023, 5, 8), Time.local(2023, 5, 15))
+scheduled.each { |s| puts "#{s.start} - #{s.finish}  #{s.vdate.id}" }
+
+File.write("vdates.ics", VirtualDate::ICS.export(scheduled))
+File.write("vdates.yml", VirtualDate::VirtualDateFile.new(vdates).to_yaml)
+```
+
+See `example/` for a complete program.
 
 ## Tests
 

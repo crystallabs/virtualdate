@@ -1,11 +1,11 @@
 ---
 schema_version: 2
 vdates:
-- shift:
-  duration: 1800
+- duration: 1800
   parallel: 1
   priority: 0
   fixed: false
+  clamp_to_begin: false
   id: daily-standup
   due:
   - hour: 10
@@ -15,12 +15,12 @@ vdates:
   max_shifts: 1500
   flags:
   - meeting
-  depends_on: []
-- shift:
-  duration: 3600
+  shift: false
+- duration: 3600
   parallel: 1
   priority: 0
   fixed: true
+  clamp_to_begin: false
   id: planning
   due:
   - day_of_week: 1
@@ -31,12 +31,12 @@ vdates:
   max_shifts: 1500
   flags:
   - meeting
-  depends_on: []
-- shift:
-  duration: 2700
+  shift: false
+- duration: 2700
   parallel: 1
   priority: 0
   fixed: false
+  clamp_to_begin: false
   id: code-review
   due:
   - day_of_week: 3
@@ -46,4 +46,4 @@ vdates:
   max_shifts: 1500
   flags:
   - work
-  depends_on: []
+  shift: false
