@@ -3,8 +3,8 @@ require "virtualtime"
 # VirtualDate builds on VirtualTime to represent due/omit rules plus higher-level scheduling semantics.
 class VirtualDate
   VERSION_MAJOR    =  1
-  VERSION_MINOR    = 10
-  VERSION_REVISION =  1
+  VERSION_MINOR    = 11
+  VERSION_REVISION =  0
   VERSION          = [VERSION_MAJOR, VERSION_MINOR, VERSION_REVISION].join '.'
 
   include YAML::Serializable
