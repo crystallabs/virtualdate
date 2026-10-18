@@ -2071,7 +2071,10 @@ class VirtualDate
         # VirtualTime rule.
         yaml.scalar value.to_rfc3339(fraction_digits: 9)
       when VirtualTime
-        yaml.scalar value.to_yaml
+        # Nested as a mapping of its own, the way `#due` and `#omit` rules
+        # are. `value.to_yaml` with no builder would render a whole document
+        # -- `---`, the rule, a trailing newline -- and embed it as a string.
+        value.to_yaml yaml
       when Nil
         yaml.scalar nil
       end
@@ -2079,6 +2082,9 @@ class VirtualDate
 
     def self.from_yaml(ctx : YAML::ParseContext, node : YAML::Nodes::Node) : VirtualTime::TimeOrVirtualTime?
       return nil if YAML::Schema::Core.parse_null?(node)
+
+      # A rule written out as a mapping, by `.to_yaml` above or by hand
+      return VirtualTime.new(ctx, node) if node.is_a?(YAML::Nodes::Mapping)
 
       unless node.is_a?(YAML::Nodes::Scalar)
         node.raise "Expected Time or VirtualTime"
@@ -2093,7 +2099,9 @@ class VirtualDate
         # Not an absolute time; fall through to parsing it as a rule
       end
 
-      # 2. VirtualTime rule
+      # 2. VirtualTime rule spelled as a string -- a hand-written
+      #    `begin: "month: 4..10"`, or a document saved before rules were
+      #    written out as mappings
       begin
         VirtualTime.from_yaml(value)
       rescue e : YAML::ParseException | ArgumentError

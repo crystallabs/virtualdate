@@ -2938,6 +2938,33 @@ describe "VirtualDate – advanced scheduling" do
     vd2.deadline.should eq vd.deadline
   end
 
+  it "round-trips VirtualTime begin/end/deadline rules through YAML as mappings" do
+    vd = VirtualDate.new("patterned")
+    vd.begin = VirtualTime.new(month: 4..10)
+    vd.end = VirtualTime.new(day_of_week: 1..5)
+    vd.deadline = VirtualTime.new(hour: 17)
+
+    yaml = vd.to_yaml
+    # Regression: the rule was rendered as a whole YAML document and embedded
+    # as a string scalar, `begin: "---\nmonth: 4..10\n..."`
+    yaml.should_not contain "---\n\n"
+    yaml.should contain "begin:\n  month: 4..10\n"
+
+    vd2 = VirtualDate.from_yaml yaml
+    vd2.begin.as(VirtualTime).month.should eq 4..10
+    vd2.end.as(VirtualTime).day_of_week.should eq 1..5
+    vd2.deadline.as(VirtualTime).hour.should eq 17
+
+    # The string spelling, hand-written or from an older document, still loads
+    vd3 = VirtualDate.from_yaml "id: a\nbegin: \"month: 4..10\"\nend: |\n  ---\n  day: 5\n"
+    vd3.begin.as(VirtualTime).month.should eq 4..10
+    vd3.end.as(VirtualTime).day.should eq 5
+
+    # And so does a document carrying one, with the validator in front
+    document = {"schema_version" => VirtualDate::Migrator::CURRENT_VERSION, "vdates" => [vd]}.to_yaml
+    VirtualDate::VirtualDateFile.load(document).first.begin.as(VirtualTime).month.should eq 4..10
+  end
+
   it "round-trips sub-second spans through YAML" do
     vd = VirtualDate.new("subsecond")
     vd.shift = -500.milliseconds
