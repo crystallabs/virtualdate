@@ -3309,6 +3309,20 @@ describe "VirtualDate – advanced scheduling" do
     end
   end
 
+  it "writes a document with VirtualDateFile.new that VirtualDateFile.load reads back" do
+    vd = VirtualDate.new("a")
+    vd.due << VirtualTime.new(hour: 10)
+    other = VirtualDate.new("b")
+    other.depends_on << vd
+
+    yaml = VirtualDate::VirtualDateFile.new([vd, other]).to_yaml
+    yaml.should contain "schema_version: #{VirtualDate::Migrator::CURRENT_VERSION}"
+
+    loaded = VirtualDate::VirtualDateFile.load yaml
+    loaded.map(&.id).should eq ["a", "b"]
+    loaded[1].depends_on_ids.should eq ["a"]
+  end
+
   it "loads a legacy bare-sequence document via VirtualDateFile.load" do
     yaml = <<-YAML
       - id: a

@@ -36,9 +36,4 @@ ics = VirtualDate::ICS.export(
 )
 File.write("vdates.ics", ics)
 
-file = {
-  "schema_version" => VirtualDate::Migrator::CURRENT_VERSION,
-  "vdates"         => vdates,
-}
-
-File.write("vdates.yml", file.to_yaml)
+File.write("vdates.yml", VirtualDate::VirtualDateFile.new(vdates).to_yaml)

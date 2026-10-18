@@ -1798,6 +1798,11 @@ class VirtualDate
     property schema_version : Int32
     property vdates : Array(VirtualDate)
 
+    # A document of `vdates` in the current format, ready for `#to_yaml`;
+    # `.load` reads it back.
+    def initialize(@vdates : Array(VirtualDate), @schema_version : Int32 = Migrator::CURRENT_VERSION)
+    end
+
     def self.load(yaml : String) : Array(VirtualDate)
       doc = YAML::Nodes.parse(yaml)
       node = doc.nodes.first? || raise ArgumentError.new("Empty YAML document")
@@ -1806,10 +1811,11 @@ class VirtualDate
       when YAML::Nodes::Mapping
         # Validation applies to the current (schema-versioned) format only,
         # so it must run after the root type is known. The already-parsed root
-        # is handed over rather than the string, saving a re-parse.
+        # is handed over rather than the string, here and below, saving a
+        # re-parse.
         YamlValidator.validate!(node)
 
-        file = from_yaml(yaml)
+        file = new(YAML::ParseContext.new, node)
 
         if file.schema_version > Migrator::CURRENT_VERSION
           raise ArgumentError.new("Unsupported schema_version #{file.schema_version}")
@@ -1818,7 +1824,7 @@ class VirtualDate
         file.vdates
       when YAML::Nodes::Sequence
         # Legacy format: bare vdate list
-        Array(VirtualDate).from_yaml(yaml)
+        Array(VirtualDate).new(YAML::ParseContext.new, node)
       else
         raise ArgumentError.new(
           "Invalid YAML root (expected mapping with schema_version or vdate list)"
