@@ -681,6 +681,13 @@ class VirtualDate
         if vdate.parallel < 1
           raise ArgumentError.new("parallel of vdate '#{vdate.id}' must be >= 1")
         end
+
+        # A stagger only comes into play alongside parallelism. Checked here
+        # with the other limits rather than at the first occurrence that
+        # would use it, which a vdate with none in the window never reaches.
+        if (stagger = vdate.stagger) && vdate.parallel > 1 && stagger <= Time::Span.zero
+          raise ArgumentError.new("stagger of vdate '#{vdate.id}' must be > 0")
+        end
       end
     end
 
@@ -1326,8 +1333,6 @@ class VirtualDate
         next unless seen_starts.add?(start)
 
         if (stagger = vdate.stagger) && vdate.parallel > 1
-          raise ArgumentError.new("stagger must be positive") if stagger <= 0.seconds
-
           vdate.parallel.times do |i|
             t = start + stagger * i
             break if t >= to
