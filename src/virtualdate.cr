@@ -3,7 +3,7 @@ require "virtualtime"
 # VirtualDate builds on VirtualTime to represent due/omit rules plus higher-level scheduling semantics.
 class VirtualDate
   VERSION_MAJOR    =  1
-  VERSION_MINOR    = 11
+  VERSION_MINOR    = 12
   VERSION_REVISION =  0
   VERSION          = [VERSION_MAJOR, VERSION_MINOR, VERSION_REVISION].join '.'
 
@@ -143,12 +143,45 @@ class VirtualDate
     #    Look for a base time such that:
     #      strict_on?(base) => Time::Span delta
     #      base + delta == time
-    VirtualTime::Search.shifted_from_base?(time, shift, max_shift: max_shift, max_shifts: max_shifts) do |base|
+    #
+    #    A base's own search walks forward a shift at a time and stops at the
+    #    first time that is not omitted. It can therefore only arrive at `time`
+    #    if `time` is not omitted and every step between the two is -- so the
+    #    walk back is over as soon as it meets a time that is not omitted:
+    #    every base behind that one stops there, or runs out of bounds there.
+    #    Without this, asking about a time the vdate is simply not on costs
+    #    `max_shifts` questions, where it nearly always takes one to know.
+    reach = omitted_steps_before time, shift, max_shifts
+    return false if reach == 0
+
+    VirtualTime::Search.shifted_from_base?(time, shift, max_shift: max_shift, max_shifts: reach) do |base|
       r = strict_on?(base, max_shift: max_shift, max_shifts: max_shifts, hint: base)
       # As mentioned, only Time::Span results participate in inverse reachability
       # (value of `true` does NOT imply reachability of `time`)
       r.is_a?(Time::Span) ? r : nil
     end
+  end
+
+  # Returns how many steps of `shift` back from `time` a base can lie and
+  # still shift onto it, at most `limit`: none if `time` is itself omitted,
+  # otherwise the run of omitted times directly behind it.
+  private def omitted_steps_before(time : Time, shift : Time::Span, limit : Int32) : Int32
+    return 0 if omit_on? time
+
+    steps = 0
+    at = time
+    while steps < limit
+      at = begin
+        at - shift
+      rescue ArgumentError | OverflowError
+        # Off the end of the calendar: no base lies there
+        break
+      end
+      break unless omit_on? at
+
+      steps += 1
+    end
+    steps
   end
 
   # Checks whether the vdate is "on" on the specified date/time.
@@ -349,7 +382,14 @@ class VirtualDate
     case r
     when Time::Span
       t = time.is_a?(Time) ? time : time.to_time(hint)
-      t + r
+      begin
+        t + r
+      rescue OverflowError
+        # A span near `Time::Span::MAX` overflows the arithmetic inside
+        # `Time#+` before its range check can speak. Same complaint as for
+        # any other span that leaves the calendar, in the same voice.
+        raise ArgumentError.new("Shifting #{t} by #{r} leaves the calendar")
+      end
     else
       r
     end
@@ -432,7 +472,12 @@ class VirtualDate
 
   # Furthest `#due_stretch_end` follows a stretch over the due times that
   # continue it.
-  MAX_STRETCH_STEPS = 64
+  #
+  # A due time naming only dates is followed a day at a time, so this is also
+  # the longest such occurrence, in days, that is still told apart from one
+  # that never ends -- and `month: 6..8` is ninety-two of them. Eleven years'
+  # worth leaves room for a rule naming a span of years.
+  MAX_STRETCH_STEPS = 4096
 
   # The first time strictly after `from` that `vtime` matches, `nil` when it
   # never does.
@@ -453,10 +498,16 @@ class VirtualDate
   private def due_stretch_end(at : Time) : Time?
     ending = at
     MAX_STRETCH_STEPS.times do
-      matching = @due.select(&.matches?(ending))
-      return ending if matching.empty?
+      furthest = nil
+      @due.each do |vtime|
+        next unless vtime.matches? ending
 
-      ending = matching.max_of { |vtime| MatchRun.block_end vtime, ending }
+        block_end = MatchRun.block_end vtime, ending
+        furthest = block_end if furthest.nil? || block_end > furthest
+      end
+      return ending unless furthest
+
+      ending = furthest
       return ending unless @due.any?(&.matches?(ending + 1.nanosecond))
 
       ending += 1.nanosecond
@@ -693,6 +744,15 @@ class VirtualDate
         if (stagger = vdate.stagger) && vdate.parallel > 1 && stagger <= Time::Span.zero
           raise ArgumentError.new("stagger of vdate '#{vdate.id}' must be > 0")
         end
+
+        # Spans that are added to a start. One longer than the calendar can
+        # only ever leave it, and one near `Time::Span::MAX` overflows the
+        # addition itself rather than being refused by it.
+        { {"shift", vdate.shift}, {"stagger", vdate.stagger} }.each do |(name, span)|
+          if span.is_a?(Time::Span) && (span > MAX_DURATION || span < -MAX_DURATION)
+            raise ArgumentError.new("#{name} of vdate '#{vdate.id}' is longer than the calendar")
+          end
+        end
       end
     end
 
@@ -721,6 +781,7 @@ class VirtualDate
       validate_no_dependency_cycles!
 
       scheduled_vdates = [] of Scheduled
+      agenda = Agenda.new scheduled_vdates
 
       ordered = order_vdates_by_dependencies(@vdates)
       scheduled_index = {} of VirtualDate => Scheduled
@@ -749,11 +810,11 @@ class VirtualDate
             candidate.explanation.add("Shifted from #{original_start} to #{dependency_floor} to satisfy dependency constraints")
           end
 
-          scheduled_vdate = schedule_candidate(candidate, scheduled_vdates, horizon: to, depended_upon: depended_upon, displaced: displaced)
+          scheduled_vdate = place(candidate, agenda, horizon: to, depended_upon: depended_upon, displaced: displaced)
 
           if scheduled_vdate
             placed = true
-            scheduled_vdates << scheduled_vdate
+            agenda.add scheduled_vdate
             scheduled_index[scheduled_vdate.vdate] = scheduled_vdate
           else
             rejected = true
@@ -772,7 +833,7 @@ class VirtualDate
         end
       end
 
-      replace_displaced displaced, scheduled_vdates, to, depended_upon
+      replace_displaced displaced, agenda, to, depended_upon
 
       scheduled_vdates.sort_by!(&.start)
       scheduled_vdates
@@ -788,7 +849,7 @@ class VirtualDate
     # (initial queue × priority levels, at most the vdate count), so it stays
     # a backstop for the reasoning rather than a working limit; a schedule of
     # hundreds of displaced occurrences with no cascading fits well inside it.
-    private def replace_displaced(displaced : Array(Scheduled), scheduled_vdates : Array(Scheduled), horizon : Time, depended_upon : Set(VirtualDate)) : Nil
+    private def replace_displaced(displaced : Array(Scheduled), agenda : Agenda, horizon : Time, depended_upon : Set(VirtualDate)) : Nil
       guard = displaced.size * (@vdates.size + 1) + 64
 
       until displaced.empty? || (guard -= 1) < 0
@@ -801,8 +862,8 @@ class VirtualDate
         entry.explanation.lines.each { |line| candidate.explanation.add line }
         candidate.explanation.add "Attempting re-placement after displacement from #{entry.start}"
 
-        if rescheduled = schedule_candidate(candidate, scheduled_vdates, horizon: horizon, depended_upon: depended_upon, displaced: displaced, origin: entry.origin)
-          scheduled_vdates << rescheduled
+        if rescheduled = place(candidate, agenda, horizon: horizon, depended_upon: depended_upon, displaced: displaced, origin: entry.origin)
+          agenda.add rescheduled
         end
       end
     end
@@ -1339,7 +1400,13 @@ class VirtualDate
 
         if (stagger = vdate.stagger) && vdate.parallel > 1
           vdate.parallel.times do |i|
-            t = start + stagger * i
+            t =
+              begin
+                start + stagger * i
+              rescue ArgumentError | OverflowError
+                # Off the end of the calendar, which is past the window
+                break
+              end
             break if t >= to
             break if candidates.size >= max_candidates
 
@@ -1381,8 +1448,14 @@ class VirtualDate
     # after displacement passes the occurrence's original start, so the
     # documented *total* shift bound holds across the displacement rather than
     # restarting at the start it lost.
-    # ameba:disable Metrics/CyclomaticComplexity
     def schedule_candidate(candidate : Candidate, scheduled_vdates : Array(Scheduled), *, horizon : Time, depended_upon : Set(VirtualDate) = vdates_with_dependents, displaced : Array(Scheduled)? = nil, origin : Time? = nil) : Scheduled?
+      place candidate, Agenda.new(scheduled_vdates), horizon: horizon, depended_upon: depended_upon, displaced: displaced, origin: origin
+    end
+
+    # :ditto: against an `Agenda`, which `#build` keeps for the whole pass
+    # rather than having one indexed afresh for every candidate.
+    # ameba:disable Metrics/CyclomaticComplexity
+    private def place(candidate : Candidate, agenda : Agenda, *, horizon : Time, depended_upon : Set(VirtualDate), displaced : Array(Scheduled)?, origin : Time? = nil) : Scheduled?
       vdate = candidate.vdate
       start = candidate.start
       duration = vdate.duration
@@ -1474,7 +1547,7 @@ class VirtualDate
         # Several of them can converge here: occurrences before a dependency
         # floor all move onto it, and conflict resolution can walk two of them
         # onto a single start.
-        if scheduled_vdates.any? { |i| i.vdate.same?(vdate) && i.start == start }
+        if agenda.starting_at?(start, &.vdate.same?(vdate))
           explanation.add "Rejected: #{vdate.id} is already scheduled at #{start}"
           return nil
         end
@@ -1504,7 +1577,7 @@ class VirtualDate
         # Check parallelism / conflicts. A zero-duration vdate overlaps nothing
         # that starts at or after it, but it does overlap anything already under
         # way, so it can be in conflict like any other.
-        if acceptable_parallelism?(scheduled, scheduled_vdates)
+        if acceptable_parallelism?(scheduled, agenda)
           explanation.add "Scheduled at #{start}, no conflicts, parallelism OK"
           return scheduled
         end
@@ -1512,9 +1585,7 @@ class VirtualDate
         # Conflict exists. Only vdates competing for the same parallelism slots
         # (sharing an effective flag group) count; an unrelated overlapping vdate
         # can run in parallel and must not be displaced or yielded to.
-        conflict = scheduled_vdates.find do |i|
-          overlaps?(start, finish, i.start, i.finish) && shares_flag_group?(vdate, i.vdate)
-        end
+        conflict = agenda.first_overlapping(start, finish) { |i| shares_flag_group?(vdate, i.vdate) }
 
         # Fixed vdate rules
         if conflict
@@ -1556,7 +1627,7 @@ class VirtualDate
               return nil
             end
 
-            scheduled_vdates.delete(conflict)
+            agenda.delete conflict
             displaced << conflict if displaced
             explanation.add "Displaced movable vdate #{conflict.vdate.id} because this vdate is fixed"
             next
@@ -1570,7 +1641,7 @@ class VirtualDate
           # that is no longer in the schedule. Priority is a preference, whereas
           # a dependency is structural, so the dependency wins.
           if vdate.priority > conflict.vdate.priority && !depended_upon.includes?(conflict.vdate)
-            scheduled_vdates.delete(conflict)
+            agenda.delete conflict
             displaced << conflict if displaced
             explanation.add "Displaced lower-priority vdate #{conflict.vdate.id} (priority #{conflict.vdate.priority})"
             next
@@ -1642,13 +1713,12 @@ class VirtualDate
     # misses the case where a third vdate overlaps two others that do not
     # overlap each other: it passes that test while pushing the one in the
     # middle over its limit.
-    private def acceptable_parallelism?(candidate : Scheduled, scheduled_vdates : Array(Scheduled)) : Bool
-      return false unless within_parallel_limit? candidate, scheduled_vdates, candidate
+    private def acceptable_parallelism?(candidate : Scheduled, agenda : Agenda) : Bool
+      return false unless within_parallel_limit? candidate, agenda, candidate
 
-      scheduled_vdates.each do |other|
-        next unless overlaps?(candidate.start, candidate.finish, other.start, other.finish)
+      agenda.each_overlapping(candidate.start, candidate.finish) do |other|
         next unless shares_flag_group?(candidate.vdate, other.vdate)
-        return false unless within_parallel_limit? other, scheduled_vdates, candidate
+        return false unless within_parallel_limit? other, agenda, candidate
       end
 
       true
@@ -1661,12 +1731,12 @@ class VirtualDate
     # union `#shares_flag_group?` uses to spot a conflict -- counting each flag
     # separately would let a vdate with two flags overlap its limit once over
     # in each of them.
-    private def within_parallel_limit?(subject : Scheduled, scheduled_vdates : Array(Scheduled), candidate : Scheduled) : Bool
+    private def within_parallel_limit?(subject : Scheduled, agenda : Agenda, candidate : Scheduled) : Bool
       limit = subject.vdate.parallel
       concurrent = competes?(subject, candidate) ? 1 : 0
       return false if concurrent + 1 > limit
 
-      scheduled_vdates.each do |other|
+      agenda.each_overlapping(subject.start, subject.finish) do |other|
         if competes?(subject, other)
           concurrent += 1
           return false if concurrent + 1 > limit
@@ -1682,6 +1752,118 @@ class VirtualDate
       return false unless shares_flag_group? subject.vdate, other.vdate
 
       overlaps? subject.start, subject.finish, other.start, other.finish
+    end
+
+    # The occurrences placed so far, with an index over their start times.
+    #
+    # Placing a candidate asks, again and again, which placed occurrences
+    # overlap a stretch of time. Asked of a plain list that is a pass over
+    # everything placed for every question, and a schedule of a few thousand
+    # occurrences spends nearly all of its time re-reading itself. Here the
+    # occurrences are also kept in start order, so only those that start near
+    # enough to overlap are looked at.
+    #
+    # `items` is the caller's own list, kept in the order occurrences were
+    # placed and changed in step with the index: it is what `#build` returns
+    # and what `#schedule_candidate` documents it removes displaced
+    # occurrences from.
+    private class Agenda
+      getter items : Array(Scheduled)
+
+      def initialize(@items : Array(Scheduled))
+        @by_start = [] of Scheduled
+        @placed_as = {} of UInt64 => Int32
+        @placements = 0
+        # No occurrence indexed runs longer than this, which is what bounds
+        # how far before a stretch an overlapping one can start.
+        @longest = Time::Span.zero
+        @items.each { |entry| index entry }
+      end
+
+      def add(entry : Scheduled) : Nil
+        @items << entry
+        index entry
+      end
+
+      def delete(entry : Scheduled) : Nil
+        @items.reject!(&.same?(entry))
+        @placed_as.delete entry.object_id
+
+        at = first_index_from entry.start
+        while at < @by_start.size && @by_start[at].start == entry.start
+          if @by_start[at].same? entry
+            @by_start.delete_at at
+            break
+          end
+          at += 1
+        end
+      end
+
+      # Yields each occurrence overlapping `start...finish`, in no particular
+      # order. What overlaps is what `Scheduler#overlaps?` says does.
+      def each_overlapping(start : Time, finish : Time, & : Scheduled ->) : Nil
+        earliest =
+          begin
+            start - @longest
+          rescue ArgumentError | OverflowError
+            nil
+          end
+
+        at = earliest ? first_index_from(earliest) : 0
+        while at < @by_start.size
+          entry = @by_start[at]
+          break unless entry.start < finish
+
+          yield entry if start < entry.finish
+          at += 1
+        end
+      end
+
+      # Returns the occurrence placed earliest -- in order of placement, not of
+      # time -- among those overlapping `start...finish` that the block accepts.
+      # Which conflict a candidate meets first decides what it does about it,
+      # so this is the order a plain list would have been searched in.
+      def first_overlapping(start : Time, finish : Time, & : Scheduled -> Bool) : Scheduled?
+        first = nil
+        first_placed = Int32::MAX
+
+        each_overlapping(start, finish) do |entry|
+          placed = @placed_as[entry.object_id]
+          next unless placed < first_placed && yield entry
+
+          first = entry
+          first_placed = placed
+        end
+
+        first
+      end
+
+      # Returns whether an occurrence the block accepts starts exactly at `start`.
+      def starting_at?(start : Time, & : Scheduled -> Bool) : Bool
+        at = first_index_from start
+        while at < @by_start.size && @by_start[at].start == start
+          return true if yield @by_start[at]
+          at += 1
+        end
+
+        false
+      end
+
+      private def index(entry : Scheduled) : Nil
+        @placed_as[entry.object_id] = @placements
+        @placements += 1
+
+        duration = entry.finish - entry.start
+        @longest = duration if duration > @longest
+
+        at = @by_start.bsearch_index { |placed| placed.start > entry.start } || @by_start.size
+        @by_start.insert at, entry
+      end
+
+      # Index of the first occurrence starting at or after `time`.
+      private def first_index_from(time : Time) : Int32
+        @by_start.bsearch_index { |placed| placed.start >= time } || @by_start.size
+      end
     end
 
     # Ensure there are no dependency cycles or raise.
@@ -1840,6 +2022,15 @@ class VirtualDate
           "Invalid YAML root (expected mapping with schema_version or vdate list)"
         )
       end
+    rescue e : YAML::ParseException | ArgumentError
+      raise e
+    rescue e
+      # What a document can get wrong is not limited to what the parser and the
+      # converters here report in their own voice: a zone name the database
+      # does not know, or an alias to a value of another type, raise errors of
+      # their own kind from further down. A caller guarding a load should have
+      # one kind of failure to guard against.
+      raise ArgumentError.new("Invalid YAML: #{e.message}")
     end
   end
 
@@ -2077,6 +2268,20 @@ class VirtualDate
     end
   end
 
+  # Returns the node `node` stands for: the one it was anchored to if it is a
+  # YAML alias, itself otherwise.
+  #
+  # The converters below are handed raw nodes, and an alias is what `#to_yaml`
+  # writes for a rule object that appears a second time -- one `VirtualTime`
+  # used as the `#begin` of two vdates, say -- as well as what a hand-written
+  # document uses to share a value. Reading only the node types they expect,
+  # they would refuse a document this very class wrote out.
+  protected def self.anchored(node : YAML::Nodes::Node) : YAML::Nodes::Node
+    return node unless node.is_a?(YAML::Nodes::Alias)
+
+    node.value || node.raise "Unknown YAML alias"
+  end
+
   class VirtualTimeOrTimeConverter
     def self.to_yaml(value : VirtualTime::TimeOrVirtualTime?, yaml : YAML::Nodes::Builder)
       case value
@@ -2097,6 +2302,7 @@ class VirtualDate
     end
 
     def self.from_yaml(ctx : YAML::ParseContext, node : YAML::Nodes::Node) : VirtualTime::TimeOrVirtualTime?
+      node = VirtualDate.anchored node
       return nil if YAML::Schema::Core.parse_null?(node)
 
       # A rule written out as a mapping, by `.to_yaml` above or by hand
@@ -2181,6 +2387,7 @@ class VirtualDate
     # Returns the `Time::Span` `node` carries, raising at the node's own
     # position when it holds anything else.
     def self.from_node(node : YAML::Nodes::Node) : Time::Span
+      node = VirtualDate.anchored node
       unless node.is_a?(YAML::Nodes::Scalar)
         node.raise "Expected a number of seconds for Time::Span"
       end
@@ -2206,6 +2413,7 @@ class VirtualDate
     end
 
     def self.from_yaml(ctx : YAML::ParseContext, node : YAML::Nodes::Node) : Time::Span?
+      node = VirtualDate.anchored node
       YAML::Schema::Core.parse_null?(node) ? nil : SecondsSpan.from_node(node)
     end
   end
@@ -2223,6 +2431,7 @@ class VirtualDate
     end
 
     def self.from_yaml(ctx : YAML::ParseContext, node : YAML::Nodes::Node) : Nil | Bool | Time::Span
+      node = VirtualDate.anchored node
       return nil if YAML::Schema::Core.parse_null?(node)
 
       unless node.is_a?(YAML::Nodes::Scalar)

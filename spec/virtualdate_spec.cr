@@ -4079,6 +4079,118 @@ describe "VirtualDate#next_on" do
   end
 end
 
+describe "VirtualDate regressions from fuzzing" do
+  it "follows a due stretch longer than 64 days to its end" do
+    # Regression: `month: 6..8` is one 92-day occurrence, and giving up on its
+    # end after 64 days read as "never ends" -- so nothing came after it
+    vd = VirtualDate.new "summer"
+    vd.due << VirtualTime.new(month: 6..8)
+    vd.next_on(Time.utc(2025, 6, 10)).should eq Time.utc(2026, 6, 1)
+
+    vd.omit << VirtualTime.new(year: 2025)
+    vd.next_on(Time.utc(2025, 5, 1)).should eq Time.utc(2026, 6, 1)
+  end
+
+  it "reads back a document in which one rule object appears twice" do
+    # Regression: the second appearance is written as a YAML alias, which the
+    # converters for `begin`, `end` and `deadline` refused
+    hours = VirtualTime.new hour: 9..17
+    first = VirtualDate.new "first"
+    second = VirtualDate.new "second"
+    first.begin = hours
+    second.begin = hours
+    second.deadline = hours
+
+    loaded = VirtualDate::VirtualDateFile.load VirtualDate::VirtualDateFile.new([first, second]).to_yaml
+    loaded.size.should eq 2
+    loaded[1].begin.should eq hours
+    loaded[1].deadline.should eq hours
+  end
+
+  it "reads hand-written aliases in converter-backed fields" do
+    loaded = VirtualDate::VirtualDateFile.load <<-YAML
+      schema_version: 2
+      vdates:
+        - id: a
+          begin: &start 2025-01-01T00:00:00Z
+          shift: &step 3600
+          max_shift: &most 7200
+        - id: b
+          begin: *start
+          shift: *step
+          max_shift: *most
+      YAML
+
+    loaded[1].begin.should eq Time.utc(2025, 1, 1)
+    loaded[1].shift.should eq 1.hour
+    loaded[1].max_shift.should eq 2.hours
+  end
+
+  it "fails a load with an ArgumentError whatever went wrong further down" do
+    # Regression: an alias to a value of another type surfaced as a bare
+    # `Exception` from the YAML parser
+    expect_raises(ArgumentError) do
+      VirtualDate::VirtualDateFile.load "schema_version: 2\nvdates:\n  - {on: &x 5, id: *x}\n"
+    end
+  end
+
+  it "refuses spans too large for the calendar with an ArgumentError" do
+    # Regression: spans near `Time::Span::MAX` overflowed the addition itself
+    from = Time.utc 2025, 1, 1
+    vd = VirtualDate.new "huge"
+    vd.on = Time::Span::MAX
+    expect_raises(ArgumentError) { vd.resolve from }
+
+    vd = VirtualDate.new "staggered"
+    vd.stagger = Time::Span::MAX
+    vd.parallel = 2
+    expect_raises(ArgumentError, /longer than the calendar/) { VirtualDate::Scheduler.new([vd]).build(from, from + 1.day) }
+
+    vd = VirtualDate.new "shifted"
+    vd.shift = Time::Span::MIN
+    expect_raises(ArgumentError, /longer than the calendar/) { VirtualDate::Scheduler.new([vd]).build(from, from + 1.day) }
+  end
+
+  it "answers on? for a time nothing shifts onto without walking max_shifts back" do
+    # The inverse search stops at the first time behind the asked one that is
+    # not omitted; the answers are what the full walk gave
+    vd = VirtualDate.new
+    vd.due << VirtualTime.new(hour: 9, minute: 0)
+    vd.omit << VirtualTime.new(hour: 9..11)
+    vd.shift = 1.hour
+
+    day = Time.utc 2025, 3, 3
+    vd.on?(day + 12.hours).should be_true  # 09:00 walks past 10:00 and 11:00
+    vd.on?(day + 11.hours).should be_false # omitted itself
+    vd.on?(day + 13.hours).should be_false # 12:00 is not omitted: the walk stops there
+  end
+
+  it "keeps the order conflicts are met in with the start index in place" do
+    # Two occurrences overlap the candidate; the one placed first is the one
+    # it has to settle with, however the two sort by start
+    from = Time.utc 2025, 3, 3
+    late = VirtualDate.new "late"
+    late.due << VirtualTime.new(hour: 10, minute: 30)
+    late.duration = 1.hour
+    late.priority = 5
+    early = VirtualDate.new "early"
+    early.due << VirtualTime.new(hour: 10, minute: 0)
+    early.duration = 1.hour
+    early.priority = 5
+    early.parallel = 2
+    late.parallel = 2
+    scheduler = VirtualDate::Scheduler.new [late, early]
+    placed = scheduler.build(from, from + 1.day)
+
+    candidate = VirtualDate::Candidate.new VirtualDate.new("probe").tap { |probe| probe.duration = 2.hours; probe.priority = 9 }, from + 10.hours
+    listed = placed.sort_by { |entry| entry.vdate.id == "late" ? 0 : 1 }
+    displaced = [] of VirtualDate::Scheduled
+    scheduler.schedule_candidate(candidate, listed, horizon: from + 1.day, displaced: displaced).should_not be_nil
+    displaced.map(&.vdate.id).should eq ["late", "early"]
+    listed.should be_empty
+  end
+end
+
 describe "VirtualDate::VERSION" do
   it "matches the version shard.yml declares" do
     # Regression: the constants lagged behind shard.yml by a release
